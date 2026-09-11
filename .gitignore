@@ -1,0 +1,19 @@
+﻿# Virtual Environment
+.venv/
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# Environment variables & secrets (CRITICAL)
+.env
+
+# Local database & traces
+*.sqlite
+*.sqlite3
+default.sqlite
+
+# Generated artifacts
+top_deals_chart.png

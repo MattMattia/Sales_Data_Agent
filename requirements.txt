@@ -1,0 +1,39 @@
+# ==============================================================================
+# SALES DATA AGENT - PROJECT DEPENDENCIES
+# ==============================================================================
+
+# --- Multi-Agent Orchestration & Graphs ---
+langgraph>=0.2.20
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+langchain-tavily>=0.1.0
+langchain-experimental>=0.3.0
+
+# --- Snowflake & Cortex Agent Services ---
+snowflake-snowpark-python>=1.20.0
+snowflake-core>=0.11.0
+
+# --- TruLens Observability & Evaluation Suite ---
+trulens>=1.4.0
+trulens-core>=1.4.0
+trulens-providers-openai>=1.4.0
+trulens-apps-langgraph>=1.4.0
+trulens-dashboard>=1.4.0
+
+# --- Data Modeling, Configuration & Environment Runtime ---
+pydantic>=2.8.0
+python-dotenv>=1.0.0
+
+# --- Data Analysis & Scientific Computing ---
+pandas>=2.2.0
+numpy>=1.26.0
+
+# --- Chart Rendering & Visualization ---
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# --- Web UI & Real-Time File Monitoring ---
+streamlit>=1.38.0
+watchdog>=4.0.0
+
