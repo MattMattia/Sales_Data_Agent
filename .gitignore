@@ -5,10 +5,19 @@ env/
 
 # Python Cache
 __pycache__/
-*.pyc
+*.py[cod]
+
+# Tooling caches & coverage
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
 # Environment variables & secrets (CRITICAL)
 .env
+.env.*
+!.env.template
 
 # Local database & traces
 *.sqlite
@@ -17,3 +26,4 @@ default.sqlite
 
 # Generated artifacts
 top_deals_chart.png
+charts/

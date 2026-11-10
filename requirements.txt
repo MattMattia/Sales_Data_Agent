@@ -37,3 +37,6 @@ seaborn>=0.13.0
 streamlit>=1.38.0
 watchdog>=4.0.0
 
+# --- Testing ---
+pytest>=8.0.0
+
