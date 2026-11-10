@@ -346,33 +346,58 @@ class CortexAgentTool:
             ]
         })
 
+    @staticmethod
+    def _event_delta(data: Any) -> Optional[Dict[str, Any]]:
+        """Extracts the `delta` payload from a dict or JSON-string SSE event."""
+        try:
+            payload = data if isinstance(data, dict) else json.loads(data)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        delta = payload.get("delta")
+        if delta is None and isinstance(payload.get("data"), dict):
+            delta = payload["data"].get("delta")
+        return delta if isinstance(delta, dict) else None
+
+    @staticmethod
+    def _tool_result_payloads(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Returns the JSON payloads of a tool_results block, skipping malformed parts."""
+        block = item.get("tool_results")
+        contents = block.get("content") if isinstance(block, dict) else None
+        if not isinstance(contents, list):
+            return []
+        return [
+            result["json"] for result in contents
+            if isinstance(result, dict) and result.get("type") == "json" and isinstance(result.get("json"), dict)
+        ]
+
     def _consume_stream(self, stream) -> Tuple[str, str, List[Dict[str, Any]]]:
+        """
+        Folds Cortex Agent SSE events into (text, sql, citations). Malformed
+        events or content items are skipped so one bad chunk never discards
+        the rest of a production answer.
+        """
         text, sql, citations = "", "", []
         for evt in stream.events():
-            try:
-                delta = (evt.data.get("delta") if isinstance(evt.data, dict)
-                         else json.loads(evt.data).get("delta")
-                         or json.loads(evt.data).get("data", {}).get("delta"))
-            except Exception:
+            delta = self._event_delta(getattr(evt, "data", None))
+            contents = delta.get("content") if delta else None
+            if not isinstance(contents, list):
                 continue
 
-            if not isinstance(delta, dict):
-                continue
-
-            for item in delta.get("content", []):
+            for item in contents:
+                if not isinstance(item, dict):
+                    continue
                 if item.get("type") == "text":
-                    text += item.get("text", "")
+                    text += str(item.get("text", ""))
                 elif item.get("type") == "tool_results":
-                    for result in item["tool_results"].get("content", []):
-                        if result.get("type") != "json":
-                            continue
-                        j = result["json"]
-                        text += j.get("text", "")
-                        sql = j.get("sql", sql)
+                    for payload in self._tool_result_payloads(item):
+                        text += str(payload.get("text", ""))
+                        sql = payload.get("sql", sql)
                         citations.extend({
                             "source_id": s.get("source_id"),
-                            "doc_id": s.get("doc_id")
-                        } for s in j.get("searchResults", []))
+                            "doc_id": s.get("doc_id"),
+                        } for s in payload.get("searchResults", []) if isinstance(s, dict))
         return text, sql, citations
 
     def _run_mock(self, query: str) -> Tuple[str, str, str, str]:
