@@ -258,3 +258,16 @@ def test_fetch_recorded_feedback_without_records_is_pending_and_skips_database(f
 
     assert evals._fetch_recorded_feedback(recording) == {}
     assert recording.queries == []
+
+
+def test_installed_trulens_exposes_the_apis_the_scorecard_relies_on():
+    session_module = pytest.importorskip("trulens.core.session")
+    recording_module = pytest.importorskip("trulens.core.otel.recording")
+    import inspect
+
+    params = inspect.signature(session_module.TruSession.get_records_and_feedback).parameters
+    recording = recording_module.Recording(tru_app=None)
+    recording.add_record_id("rec-1")
+
+    assert "record_ids" in params
+    assert evals._recording_record_ids(recording) == ["rec-1"]
