@@ -13,12 +13,12 @@ Branch: fix/audit-remediation · Delivery: single branch, one commit per phase �
 
 ## Tasks
 - T0 S0 inline — done (ECC agents/skills present in ~/.claude)
-- T1 S1 inline — see Log
-- T2 S2 inline
-- T3 S3 inline
-- T4 S4 inline
-- T5 S5 inline
-- T6 S6 inline (tests written first as RED)
+- T1 S1 inline — done bcc80fa (`.env.template` blocked, see L2)
+- T2 S2 inline — done d738c7d
+- T3 S3 inline — done 184d59d
+- T4 S4 inline — done 1f094ce
+- T5 S5 inline — done 7ecb351
+- T6 S6 inline — done d50c7a8 (RED: collection ImportError; GREEN: 107 passed)
 
 ## Log
 - L1 (2026-11-10) "Lee el archivo CLAUDE_AUDIT_AND_REMEDIATION_PROMPT.md y ejecuta todas las fases desde el Paso 0 hasta la Fase 6"
