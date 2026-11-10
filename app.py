@@ -62,31 +62,18 @@ except ImportError as err:
     logger.warning(f"TruLens evaluation module unavailable: {err}")
     EVALS_AVAILABLE = False
 
-LEGACY_CHART_FILE = "top_deals_chart.png"
+from artifacts import read_chart_bytes  # noqa: E402
 
 
-@st.cache_resource(show_spinner=False)
 def get_trulens_recorder() -> Any:
-    """Creates the TruGraph (or MockTruGraph) recorder once per Streamlit server."""
-    return setup_trulens_recorder(compiled_graph, app_version="Streamlit UI")
-
-
-def read_chart_bytes(final_state: Dict[str, Any], start_timestamp: float) -> Optional[bytes]:
     """
-    Returns the chart image produced by this run as bytes, so each chat message
-    keeps its own immutable chart even if the file on disk is later overwritten.
-    Prefers the validated `chart_path` from the graph state, then falls back to
-    the legacy `top_deals_chart.png` when it was written during this run.
+    Returns this browser session's TruGraph (or MockTruGraph) recorder.
+    One recorder per session: a server-wide cached recorder would interleave
+    concurrent users' records and mix up their scorecards.
     """
-    candidates = [final_state.get("chart_path"), LEGACY_CHART_FILE]
-    for path in candidates:
-        if not path or not os.path.isfile(path):
-            continue
-        if path == LEGACY_CHART_FILE and os.path.getmtime(path) < start_timestamp - 1:
-            continue
-        with open(path, "rb") as chart_file:
-            return chart_file.read()
-    return None
+    if "trulens_recorder" not in st.session_state:
+        st.session_state.trulens_recorder = setup_trulens_recorder(compiled_graph, app_version="Streamlit UI")
+    return st.session_state.trulens_recorder
 
 
 def render_scorecard(scores: List[Dict[str, Any]]) -> None:

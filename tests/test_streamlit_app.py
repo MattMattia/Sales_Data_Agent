@@ -112,3 +112,14 @@ def test_graph_import_failure_is_reported_in_chat_instead_of_crashing(app, monke
 
     assert not at.exception
     assert "Graph engine could not be loaded" in _assistant_messages(at)[-1]["content"]
+
+
+def test_each_browser_session_gets_its_own_trulens_recorder(isolated_cwd):
+    first = AppTest.from_file(APP_PATH, default_timeout=APP_TIMEOUT_SECONDS).run()
+    second = AppTest.from_file(APP_PATH, default_timeout=APP_TIMEOUT_SECONDS).run()
+    for at in (first, second):
+        at.chat_input[0].set_value("What are our top 3 customer deals?").run()
+        assert not at.exception
+
+    assert "trulens_recorder" in first.session_state
+    assert first.session_state["trulens_recorder"] is not second.session_state["trulens_recorder"]

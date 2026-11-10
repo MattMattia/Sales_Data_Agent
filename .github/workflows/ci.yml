@@ -38,7 +38,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Static compilation
-        run: python -m py_compile state.py prompts.py sandbox.py tools.py nodes.py graph.py evals.py app.py
+        run: python -m py_compile state.py prompts.py sandbox.py artifacts.py tools.py nodes.py graph.py evals.py app.py
 
       - name: Scan tracked files for leaked secrets
         run: |
