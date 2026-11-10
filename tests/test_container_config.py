@@ -57,3 +57,13 @@ def test_compose_persists_trulens_data_and_gates_dashboard_on_health():
     assert "condition: service_healthy" in compose
     assert "required: false" in compose
     assert "restart: unless-stopped" in compose
+
+
+def test_trulens_dashboard_is_loopback_only_and_gets_no_secrets():
+    yaml = pytest.importorskip("yaml")
+    services = yaml.safe_load(_read("docker-compose.yml"))["services"]
+    dashboard = services["trulens-dashboard"]
+
+    assert dashboard["ports"] == ["127.0.0.1:8001:8001"]
+    assert "env_file" not in dashboard
+    assert "env_file" in services["sales-data-agent"]

@@ -26,11 +26,9 @@ services:
   trulens-dashboard:
     <<: *hardening
     image: sales-data-agent:latest
+    # Unauthenticated UI that exposes every recorded trace: loopback only, no secrets.
     ports:
-      - "8001:8001"
-    env_file:
-      - path: .env
-        required: false
+      - "127.0.0.1:8001:8001"
     environment:
       - TRULENS_DATABASE_URL=sqlite:////app/data/default.sqlite
     volumes:
