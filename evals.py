@@ -329,10 +329,19 @@ ALL_FEEDBACKS = [
 inline_evaluation = trulens_inline_eval if TRULENS_INSTALLED else mock_inline_evaluation
 
 
+DEFAULT_DATABASE_URL = "sqlite:///default.sqlite"
+DATABASE_URL_ENV_VAR = "TRULENS_DATABASE_URL"
+
+
+def resolve_database_url(database_url: Optional[str] = None) -> str:
+    """Explicit argument first, then $TRULENS_DATABASE_URL (Docker volume), then the local default."""
+    return database_url or os.getenv(DATABASE_URL_ENV_VAR) or DEFAULT_DATABASE_URL
+
+
 def setup_trulens_recorder(
     graph: Any,
     app_version: str = "L6: Production",
-    database_url: str = "sqlite:///default.sqlite",
+    database_url: Optional[str] = None,
     reset_db: bool = False,
 ) -> Any:
     """
@@ -345,8 +354,8 @@ def setup_trulens_recorder(
         Compiled LangGraph instance to instrument.
     app_version: str
         Agent version registered in TruLens.
-    database_url: str
-        SQLite database URL (defaults to 'sqlite:///default.sqlite').
+    database_url: Optional[str]
+        Database URL. Defaults to $TRULENS_DATABASE_URL, else 'sqlite:///default.sqlite'.
     reset_db: bool
         If True, resets the trace database.
 
@@ -356,6 +365,7 @@ def setup_trulens_recorder(
         with tru_recorder as recording:
             graph.invoke(...)
     """
+    database_url = resolve_database_url(database_url)
     if TRULENS_INSTALLED:
         try:
             connector = DefaultDBConnector(database_url=database_url)

@@ -196,3 +196,25 @@ def test_instrument_retrieval_preserves_the_wrapped_function_result():
     instrumented = tools.instrument_retrieval(lookup)
 
     assert instrumented("deals") == "context for deals"
+
+
+# ---------------------------------------------------------------------
+# evals: TruLens database location (shared Docker volume)
+# ---------------------------------------------------------------------
+
+def test_recorder_uses_trulens_database_url_from_environment(monkeypatch):
+    monkeypatch.setenv("TRULENS_DATABASE_URL", "sqlite:////app/data/default.sqlite")
+
+    recorder = evals.setup_trulens_recorder(graph=None)
+
+    assert recorder.session.database_url == "sqlite:////app/data/default.sqlite"
+
+
+def test_recorder_prefers_explicit_database_url_and_defaults_locally(monkeypatch):
+    monkeypatch.setenv("TRULENS_DATABASE_URL", "sqlite:////app/data/default.sqlite")
+    explicit = evals.setup_trulens_recorder(graph=None, database_url="sqlite:///custom.sqlite")
+    monkeypatch.delenv("TRULENS_DATABASE_URL")
+    default = evals.setup_trulens_recorder(graph=None)
+
+    assert explicit.session.database_url == "sqlite:///custom.sqlite"
+    assert default.session.database_url == "sqlite:///default.sqlite"
