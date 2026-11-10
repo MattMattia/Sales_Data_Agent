@@ -6,6 +6,7 @@ conftest.py), from a temporary working directory so generated charts never
 land in the repository.
 """
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -101,3 +102,13 @@ def test_clear_conversation_button_empties_history(app):
 
     assert not at.exception
     assert at.session_state["messages"] == []
+
+
+def test_graph_import_failure_is_reported_in_chat_instead_of_crashing(app, monkeypatch):
+    monkeypatch.setitem(sys.modules, "graph", None)  # forces ImportError on `from graph import ...`
+
+    at = app.run()
+    at.chat_input[0].set_value("What are our top 3 customer deals?").run()
+
+    assert not at.exception
+    assert "Graph engine could not be loaded" in _assistant_messages(at)[-1]["content"]

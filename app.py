@@ -45,11 +45,13 @@ from state import DEFAULT_ENABLED_AGENTS as DEFAULT_AGENTS
 try:
     from graph import graph as compiled_graph, run_agent
 except ImportError as err:
-    logger.error(f"Failed to import graph engine from graph.py: {err}")
+    # `err` is unbound once the except block ends, so keep the message for the fallback.
+    GRAPH_IMPORT_ERROR = str(err)
+    logger.error(f"Failed to import graph engine from graph.py: {GRAPH_IMPORT_ERROR}")
     compiled_graph = None
     def run_agent(query: str, **kwargs) -> Dict[str, Any]:
         return {
-            "final_answer": f"Error: Graph engine could not be loaded: {err}",
+            "final_answer": f"Error: Graph engine could not be loaded: {GRAPH_IMPORT_ERROR}",
             "plan": {},
         }
 
