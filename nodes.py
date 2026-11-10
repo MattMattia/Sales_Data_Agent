@@ -10,12 +10,22 @@ nodes.py - Implementation of all nodes in the Multi-Agent workflow:
 """
 
 import os
+import re
 import json
 import logging
-from typing import Any, Dict, List, Literal, Optional, Union
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional
 
-# Shared state schema import
-from state import State
+# Shared state schema, message classes and agent registry (importing state loads `.env`)
+from state import (
+    AIMessage,
+    ExecutorDecision,
+    HumanMessage,
+    PlanStep,
+    State,
+    SystemMessage,
+    WORKER_AGENTS,
+)
 
 # Prompts and system directives import
 from prompts import (
@@ -29,13 +39,13 @@ from prompts import (
     SYNTHESIZER_INSTRUCTIONS,
 )
 
-# Integrated tools import
-from tools import cortex_agent_tool, tavily_tool, python_repl_tool
+# Integrated tools import (clean `(str) -> str` wrappers for ReAct agents)
+from tools import query_cortex_agent, run_python_code, search_web
 
 logger = logging.getLogger("sales_data_agent.nodes")
 
 # =====================================================================
-# Safe Imports & Fallback Compatibility for LangGraph / LangChain
+# Safe Imports & Fallback Compatibility for LangGraph
 # =====================================================================
 
 try:
@@ -47,38 +57,13 @@ except ImportError:
         def __init__(self, update: Optional[Dict[str, Any]] = None, goto: Any = None):
             self.update = update or {}
             self.goto = goto
+        def __class_getitem__(cls, item):
+            return cls
         def __repr__(self):
             return f"Command(update={self.update}, goto={self.goto})"
 
-try:
-    from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-except ImportError:
-    try:
-        from langchain.schema import HumanMessage, AIMessage, SystemMessage
-    except ImportError:
-        class HumanMessage:
-            def __init__(self, content: str, name: Optional[str] = None):
-                self.content = content
-                self.name = name
-                self.type = "human"
-            def __repr__(self):
-                return f"HumanMessage(content={self.content!r}, name={self.name!r})"
-
-        class AIMessage:
-            def __init__(self, content: str, name: Optional[str] = None):
-                self.content = content
-                self.name = name
-                self.type = "ai"
-            def __repr__(self):
-                return f"AIMessage(content={self.content!r}, name={self.name!r})"
-
-        class SystemMessage:
-            def __init__(self, content: str, name: Optional[str] = None):
-                self.content = content
-                self.name = name
-                self.type = "system"
-            def __repr__(self):
-                return f"SystemMessage(content={self.content!r}, name={self.name!r})"
+RESEARCH_AGENTS = ("cortex_researcher", "web_researcher")
+ALLOWED_CHART_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".svg"})
 
 
 # =====================================================================
@@ -310,7 +295,7 @@ def build_react_agent(model: Any, tools: List[Any], prompt: SystemMessage) -> An
                         f"CHART_PATH: {chart_path}\n"
                         "CHART_NOTES: HealthTech Corp holds the largest deal value at $1.25M, followed by FinTech Global ($890k) and OmniRetail ($640k)."
                     )
-                    return {"messages": [HumanMessage(content=tool_result_str, name="chart_generator")]}
+                    return {"messages": [AIMessage(content=tool_result_str, name="chart_generator")]}
 
                 # Special Case: Chart Summarizer Agent
                 if "generate image captions" in prompt_content:
@@ -319,7 +304,7 @@ def build_react_agent(model: Any, tools: List[Any], prompt: SystemMessage) -> An
                         "followed by FinTech Global at $890k and OmniRetail Systems at $640k. "
                         "The top three accounts collectively represent significant near-term enterprise value."
                     )
-                    return {"messages": [HumanMessage(content=tool_result_str, name="chart_summarizer")]}
+                    return {"messages": [AIMessage(content=tool_result_str, name="chart_summarizer")]}
 
                 # Extract query for research agents
                 if isinstance(state_or_dict, dict):
@@ -358,29 +343,29 @@ def build_react_agent(model: Any, tools: List[Any], prompt: SystemMessage) -> An
 
                 return {
                     "messages": [
-                        HumanMessage(content=tool_result_str, name="sub_agent")
+                        AIMessage(content=tool_result_str, name="sub_agent")
                     ]
                 }
 
         return InternalReActAgent(model, tools, prompt)
 
 
-# ReAct Sub-Agent Instantiations
+# ReAct Sub-Agent Instantiations (tools expose clean `(str) -> str` signatures)
 cortex_agent = build_react_agent(
     model=llm,
-    tools=[cortex_agent_tool.run],
+    tools=[query_cortex_agent],
     prompt=agent_system_prompt(CORTEX_RESEARCHER_SYSTEM_PROMPT),
 )
 
 web_search_agent = build_react_agent(
     model=llm,
-    tools=[tavily_tool],
+    tools=[search_web],
     prompt=agent_system_prompt(WEB_RESEARCHER_SYSTEM_PROMPT),
 )
 
 chart_agent = build_react_agent(
     model=llm,
-    tools=[python_repl_tool],
+    tools=[run_python_code],
     prompt=agent_system_prompt(CHART_GENERATOR_SYSTEM_PROMPT),
 )
 
@@ -391,49 +376,177 @@ chart_summary_agent = build_react_agent(
 )
 
 
+
+
 # =====================================================================
-# 2. Orchestrator Nodes: planner_node and executor_node
+# 2. Parsing, Validation & Safety Helpers
+# =====================================================================
+
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+_CHART_PATH_RE = re.compile(r"^\s*CHART_PATH:\s*(.+?)\s*$", re.MULTILINE)
+_CHART_NOTES_RE = re.compile(r"^\s*CHART_NOTES:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def _parse_json_safely(raw_text: str) -> Dict[str, Any]:
+    """
+    Parses a JSON object emitted by an LLM, tolerating Markdown code fences
+    (```json ... ```) and surrounding prose. Raises ValueError otherwise.
+    """
+    text = (raw_text or "").strip()
+    fenced = _JSON_FENCE_RE.search(text)
+    if fenced:
+        text = fenced.group(1).strip()
+    elif not text.startswith("{"):
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            text = text[start:end + 1]
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Response is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("Response JSON must be an object.")
+    return parsed
+
+
+def _message_text(reply: Any) -> str:
+    content = getattr(reply, "content", reply)
+    return content if isinstance(content, str) else str(content)
+
+
+def _allowed_agents(state: State) -> set:
+    """Worker agents routable in this session; 'synthesizer' is always allowed to terminate."""
+    enabled = state.get("enabled_agents") or list(WORKER_AGENTS)
+    return (set(enabled) & WORKER_AGENTS) | {"synthesizer"}
+
+
+def _validate_plan(raw_plan: Dict[str, Any], allowed: set) -> Dict[str, Dict[str, Any]]:
+    """
+    Validates each step with PlanStep, drops steps assigned to unknown or
+    disabled agents, and renumbers the remaining steps from "1".
+    """
+    if "plan" in raw_plan and isinstance(raw_plan["plan"], dict):
+        raw_plan = raw_plan["plan"]
+
+    def order(key: Any) -> Any:
+        return (0, int(key)) if str(key).isdigit() else (1, str(key))
+
+    valid_steps: List[Dict[str, Any]] = []
+    for key in sorted(raw_plan, key=order):
+        try:
+            step = PlanStep.model_validate(raw_plan[key])
+        except Exception as exc:
+            logger.warning(f"Dropping invalid plan step {key!r}: {exc}")
+            continue
+        if step.agent not in allowed:
+            logger.warning(f"Dropping plan step {key!r}: agent {step.agent!r} is not enabled.")
+            continue
+        valid_steps.append(step.model_dump())
+
+    if not valid_steps:
+        logger.warning("Planner produced no valid step. Falling back to the synthesizer.")
+        fallback = PlanStep(agent="synthesizer", action="Answer the user query with the available context.")
+        valid_steps = [fallback.model_dump()]
+
+    return {str(index): step for index, step in enumerate(valid_steps, start=1)}
+
+
+def _plan_step(plan: Dict[str, Any], step: int) -> Dict[str, Any]:
+    return plan.get(str(step)) or plan.get(step) or {}
+
+
+def _step_instruction(step_data: Dict[str, Any]) -> str:
+    action = step_data.get("action", "")
+    goal = step_data.get("goal")
+    return f"{action} (goal: {goal})" if goal else action
+
+
+def _routable_agent(agent: Optional[str], allowed: set) -> str:
+    return agent if agent in allowed else "synthesizer"
+
+
+def safe_chart_path(raw_path: Optional[str], base_dir: Optional[Path] = None) -> Optional[str]:
+    """
+    Returns `raw_path` normalized when it is a relative image path that resolves
+    inside `base_dir` (defaults to the current working directory), else None.
+    """
+    if not raw_path:
+        return None
+    candidate = raw_path.strip().strip("`'\"")
+    path = Path(candidate)
+    if not candidate or path.is_absolute() or path.drive or path.root or ".." in path.parts:
+        return None
+    if path.suffix.lower() not in ALLOWED_CHART_SUFFIXES:
+        return None
+    base = (base_dir or Path.cwd()).resolve()
+    try:
+        (base / path).resolve().relative_to(base)
+    except ValueError:
+        return None
+    return path.as_posix()
+
+
+def _research_findings(state: State) -> List[str]:
+    return [
+        _message_text(m) for m in state.get("messages", [])
+        if getattr(m, "name", None) in RESEARCH_AGENTS
+    ]
+
+
+def _user_question(state: State) -> str:
+    question = state.get("user_query")
+    if not question and state.get("messages"):
+        question = getattr(state["messages"][0], "content", "")
+    return question or ""
+
+
+def _synthesize_answer(state: State, context_messages: List[str]) -> str:
+    context_str = "\n\n---\n\n".join(context_messages) if context_messages else "No research messages recorded."
+    summary_prompt = [
+        HumanMessage(
+            content=(
+                f"User question: {_user_question(state)}\n\n"
+                f"{SYNTHESIZER_INSTRUCTIONS}\n\n"
+                f"Context:\n\n{context_str}"
+            )
+        )
+    ]
+    return _message_text(llm.invoke(summary_prompt)).strip()
+
+
+# =====================================================================
+# 3. Orchestrator Nodes: planner_node and executor_node
 # =====================================================================
 
 def planner_node(state: State) -> Command[Literal["executor"]]:
     """
-    Executes the reasoning LLM with plan_prompt(state) and stores
-    the validated multi-step plan (with L6 sub-goals) into state.
+    Executes the reasoning LLM with plan_prompt(state) and stores the
+    PlanStep-validated multi-step plan (with L6 sub-goals) into state.
+    Revised plans are renumbered from "1", so execution restarts at step 1.
     """
     prompt = plan_prompt(state)
-    llm_reply = reasoning_llm.invoke([prompt])
-
-    content_str = (
-        llm_reply.content if isinstance(llm_reply.content, str)
-        else str(llm_reply.content)
-    )
+    content_str = _message_text(reasoning_llm.invoke([prompt]))
 
     try:
-        parsed_plan = json.loads(content_str)
-        # Normalize if the model wraps output in a root 'plan' key
-        if isinstance(parsed_plan, dict) and "plan" in parsed_plan and isinstance(parsed_plan["plan"], dict):
-            parsed_plan = parsed_plan["plan"]
-    except json.JSONDecodeError as exc:
+        raw_plan = _parse_json_safely(content_str)
+    except ValueError as exc:
         raise ValueError(f"Planner returned invalid JSON:\n{content_str}") from exc
 
-    replan = state.get("replan_flag", False)
-    user_query = state.get("user_query")
-    if not user_query and state.get("messages"):
-        first_msg = state["messages"][0]
-        user_query = getattr(first_msg, "content", str(first_msg))
+    replan = bool(state.get("replan_flag", False))
+    plan = _validate_plan(raw_plan, _allowed_agents(state))
 
     update_payload = {
-        "plan": parsed_plan,
+        "plan": plan,
         "messages": [
-            HumanMessage(
-                content=content_str,
+            AIMessage(
+                content=json.dumps(plan),
                 name="replan" if replan else "initial_plan"
             )
         ],
-        "user_query": user_query,
-        "current_step": 1 if not replan else state.get("current_step", 1),
-        "replan_flag": state.get("replan_flag", False),
-        "last_reason": "",
+        "user_query": _user_question(state),
+        "current_step": 1,
+        "replan_flag": replan,
+        "last_reason": state.get("last_reason", "") if replan else "",
         "enabled_agents": state.get("enabled_agents"),
     }
 
@@ -447,47 +560,54 @@ def executor_node(
 ) -> Command[Literal["cortex_researcher", "web_researcher", "chart_generator", "chart_summarizer", "synthesizer", "planner"]]:
     """
     Dynamic controller of the multi-agent plan lifecycle:
-    1. If recently replanned (replan_flag=True), dispatches to the planned agent without reconsidering.
-    2. Otherwise, consults the LLM with executor_prompt to assess progress and decide whether to proceed or replan.
+    1. If recently replanned (replan_flag=True), dispatches to the planned agent without reconsidering,
+       with a fresh agent_query built from the revised step.
+    2. Otherwise, consults the LLM with executor_prompt and validates its ExecutorDecision.
     3. Enforces bounded retry accounting (MAX_REPLANS = 3 per step).
     """
-    plan: Dict[str, Any] = state.get("plan", {})
+    plan: Dict[str, Any] = state.get("plan") or {}
     step: int = state.get("current_step", 1)
+    allowed = _allowed_agents(state)
 
-    # 0) If just replanned, execute the planned agent once before re-evaluating
+    # 0) If just replanned, execute the revised step once before re-evaluating
     if state.get("replan_flag"):
-        step_data = plan.get(str(step), {}) or plan.get(step, {})
-        planned_agent = step_data.get("agent", "synthesizer")
+        step_data = _plan_step(plan, step) or _plan_step(plan, 1)
+        planned_agent = _routable_agent(step_data.get("agent"), allowed)
+        instruction = _step_instruction(step_data) or state.get("user_query", "")
         return Command(
             update={
                 "replan_flag": False,
                 "current_step": step + 1,
+                "agent_query": instruction,
+                "last_reason": f"Executing revised plan step {step}: {instruction}",
             },
             goto=planned_agent,
         )
 
-    # 1) Build prompt and query reasoning_llm
-    prompt = executor_prompt(state)
-    llm_reply = reasoning_llm.invoke([prompt])
-
-    content_str = (
-        llm_reply.content if isinstance(llm_reply.content, str)
-        else str(llm_reply.content)
-    )
-
+    # 1) Build prompt, query reasoning_llm and validate the ExecutorDecision
+    content_str = _message_text(reasoning_llm.invoke([executor_prompt(state)]))
     try:
-        parsed = json.loads(content_str)
-        replan: bool = bool(parsed.get("replan", False))
-        goto: str = str(parsed.get("goto", "synthesizer"))
-        reason: str = str(parsed.get("reason", ""))
-        query: str = str(parsed.get("query", ""))
+        parsed = _parse_json_safely(content_str)
+        decision = ExecutorDecision.model_validate({
+            "replan": bool(parsed.get("replan", False)),
+            "goto": str(parsed.get("goto", "synthesizer")),
+            "reason": str(parsed.get("reason", "")),
+            "query": str(parsed.get("query", "")),
+        })
     except Exception as exc:
         raise ValueError(f"Invalid executor JSON response:\n{content_str}") from exc
 
+    planned_agent = _plan_step(plan, step).get("agent")
+    goto = decision.goto
+    if goto not in allowed and goto != "planner":
+        fallback = _routable_agent(planned_agent, allowed)
+        logger.warning(f"Executor chose unknown node {goto!r}; routing to {fallback!r}.")
+        goto = fallback
+
     updates: Dict[str, Any] = {
-        "messages": [HumanMessage(content=content_str, name="executor")],
-        "last_reason": reason,
-        "agent_query": query,
+        "messages": [AIMessage(content=content_str, name="executor")],
+        "last_reason": decision.reason,
+        "agent_query": decision.query,
     }
 
     # Replan accounting per step
@@ -495,25 +615,23 @@ def executor_node(
     step_replans = replans.get(step, 0)
 
     # 2) Replan decision
-    if replan:
+    if decision.replan or goto == "planner":
         if step_replans < MAX_REPLANS:
             replans[step] = step_replans + 1
             updates.update({
                 "replan_attempts": replans,
-                "replan_flag": True,   # Next turn executes planned agent once
-                "current_step": step,  # Maintain current step index for revised plan
+                "replan_flag": True,   # Next turn executes the revised plan's step once
+                "current_step": step,
             })
             return Command(update=updates, goto="planner")
-        else:
-            # Retry cap reached: skip step and delegate to next planned agent or synthesizer
-            next_step_data = plan.get(str(step + 1), {}) or plan.get(step + 1, {})
-            next_agent = next_step_data.get("agent", "synthesizer")
-            updates["current_step"] = step + 1
-            return Command(update=updates, goto=next_agent)
+        # Retry cap reached: skip step and delegate to next planned agent or synthesizer
+        next_step_data = _plan_step(plan, step + 1)
+        updates["current_step"] = step + 1
+        if next_step_data:
+            updates["agent_query"] = _step_instruction(next_step_data)
+        return Command(update=updates, goto=_routable_agent(next_step_data.get("agent"), allowed))
 
     # 3) Happy path: run selected agent; advance step counter only if following plan
-    step_data = plan.get(str(step), {}) or plan.get(step, {})
-    planned_agent = step_data.get("agent")
     updates["current_step"] = step + 1 if goto == planned_agent else step
     updates["replan_flag"] = False
 
@@ -521,7 +639,7 @@ def executor_node(
 
 
 # =====================================================================
-# 3. Specialist Worker Nodes
+# 4. Specialist Worker Nodes
 # =====================================================================
 
 def cortex_agents_research_node(
@@ -530,11 +648,11 @@ def cortex_agents_research_node(
     """
     Sub-agent for internal enterprise retrieval across Snowflake Cortex (Analyst & Search).
     """
-    query = state.get("agent_query", state.get("user_query", ""))
-    agent_response = cortex_agent.invoke({"messages": query})
+    query = state.get("agent_query") or state.get("user_query", "")
+    agent_response = cortex_agent.invoke({"messages": [HumanMessage(content=query)]})
 
-    last_content = agent_response["messages"][-1].content
-    new_message = HumanMessage(content=last_content, name="cortex_researcher")
+    last_content = _message_text(agent_response["messages"][-1])
+    new_message = AIMessage(content=last_content, name="cortex_researcher")
 
     return Command(
         update={"messages": [new_message]},
@@ -548,92 +666,97 @@ def web_research_node(
     """
     Sub-agent for external public web intelligence using TavilySearch.
     """
-    agent_query = state.get("agent_query", state.get("user_query", ""))
-    result = web_search_agent.invoke({"messages": agent_query})
+    agent_query = state.get("agent_query") or state.get("user_query", "")
+    result = web_search_agent.invoke({"messages": [HumanMessage(content=agent_query)]})
 
     # Ensure the terminal message is named web_researcher
-    result["messages"][-1] = HumanMessage(
-        content=result["messages"][-1].content, name="web_researcher"
-    )
+    messages = list(result["messages"])
+    messages[-1] = AIMessage(content=_message_text(messages[-1]), name="web_researcher")
 
     return Command(
-        update={"messages": result["messages"]},
+        update={"messages": messages},
         goto="executor",
     )
 
 
 def chart_node(state: State) -> Command[Literal["chart_summarizer"]]:
     """
-    Sub-agent for generating plotting code and rendering charts to disk via python_repl_tool.
+    Sub-agent for generating plotting code and rendering charts to disk via the
+    sandboxed Python tool. Receives a focused instruction plus the collected
+    research data, and stores the validated CHART_PATH / CHART_NOTES in state.
     """
-    result = chart_agent.invoke(state)
-    result["messages"][-1] = HumanMessage(
-        content=result["messages"][-1].content, name="chart_generator"
+    instruction = state.get("agent_query") or state.get("user_query", "")
+    findings = "\n\n---\n\n".join(_research_findings(state)) or "No research data collected."
+    chart_request = HumanMessage(
+        content=f"Chart task: {instruction}\n\nData collected by the researchers:\n{findings}"
     )
+    result = chart_agent.invoke({"messages": [chart_request]})
+    output = _message_text(result["messages"][-1])
+
+    path_match = _CHART_PATH_RE.search(output)
+    notes_match = _CHART_NOTES_RE.search(output)
+    chart_path = safe_chart_path(path_match.group(1)) if path_match else None
+    if path_match and chart_path is None:
+        logger.error("Security: rejected unsafe CHART_PATH emitted by chart_generator.")
 
     return Command(
-        update={"messages": result["messages"]},
+        update={
+            "messages": [AIMessage(content=output, name="chart_generator")],
+            "chart_path": chart_path,
+            "chart_notes": notes_match.group(1) if notes_match else None,
+        },
         goto="chart_summarizer",
     )
 
 
 def chart_summary_node(
     state: State,
-) -> Command[Literal[END]]:
+) -> Command[Literal["__end__"]]:
     """
-    Sub-agent that generates a concise standalone caption for the saved chart image and concludes at END.
+    Generates a concise caption for the saved chart image. When researchers
+    collected findings, the caption is combined with an executive synthesis so
+    compound questions never lose analytical context. Concludes at END.
     """
-    result = chart_summary_agent.invoke(state)
-    final_summary = result["messages"][-1].content
+    caption_request = HumanMessage(
+        content=(
+            f"PATH: {state.get('chart_path') or 'unknown'}\n"
+            f"CHART_NOTES: {state.get('chart_notes') or 'none'}"
+        )
+    )
+    result = chart_summary_agent.invoke({"messages": [caption_request]})
+    caption = _message_text(result["messages"][-1]).strip()
+
+    findings = _research_findings(state)
+    if findings:
+        synthesis = _synthesize_answer(state, findings + [f"Chart summary: {caption}"])
+        final_answer = f"{synthesis}\n\n**Chart summary:** {caption}"
+    else:
+        final_answer = caption
 
     return Command(
         update={
-            "messages": result["messages"],
-            "final_answer": final_summary,
+            "messages": [AIMessage(content=caption, name="chart_summarizer")],
+            "final_answer": final_answer,
         },
         goto=END,
     )
 
 
-def synthesizer_node(state: State) -> Command[Literal[END]]:
+def synthesizer_node(state: State) -> Command[Literal["__end__"]]:
     """
     Executive synthesizer: consolidates findings from researchers and visualization
     into a concise prose report with figures, estimates, and citations, concluding at END.
     """
     relevant_msgs = [
-        m.content for m in state.get("messages", [])
-        if getattr(m, "name", None) in (
-            "web_researcher",
-            "cortex_researcher",
-            "chart_generator",
-            "chart_summarizer"
-        )
+        _message_text(m) for m in state.get("messages", [])
+        if getattr(m, "name", None) in (*RESEARCH_AGENTS, "chart_generator", "chart_summarizer")
     ]
-
-    user_question = state.get("user_query")
-    if not user_question and state.get("messages"):
-        first_msg = state["messages"][0]
-        user_question = getattr(first_msg, "content", "")
-
-    context_str = "\n\n---\n\n".join(relevant_msgs) if relevant_msgs else "No research messages recorded."
-
-    summary_prompt = [
-        HumanMessage(
-            content=(
-                f"User question: {user_question}\n\n"
-                f"{SYNTHESIZER_INSTRUCTIONS}\n\n"
-                f"Context:\n\n{context_str}"
-            )
-        )
-    ]
-
-    llm_reply = llm.invoke(summary_prompt)
-    answer = llm_reply.content.strip()
+    answer = _synthesize_answer(state, relevant_msgs)
 
     return Command(
         update={
             "final_answer": answer,
-            "messages": [HumanMessage(content=answer, name="synthesizer")],
+            "messages": [AIMessage(content=answer, name="synthesizer")],
         },
         goto=END,
     )

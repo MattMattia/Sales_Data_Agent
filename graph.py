@@ -11,8 +11,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 # Shared State and Message Schemas
-from state import State
-from prompts import HumanMessage
+from state import DEFAULT_ENABLED_AGENTS, HumanMessage, State
 
 # Orchestrator and Worker Nodes
 from nodes import (
@@ -168,13 +167,8 @@ graph = build_graph()
 # 2. Execution and Interface Functions
 # =====================================================================
 
-DEFAULT_AGENTS = [
-    "cortex_researcher",
-    "web_researcher",
-    "chart_generator",
-    "chart_summarizer",
-    "synthesizer",
-]
+# Backward-compatible alias of the shared agent registry in state.py
+DEFAULT_AGENTS = DEFAULT_ENABLED_AGENTS
 
 def run_agent(
     query: str,
@@ -218,6 +212,8 @@ def run_agent(
         "current_step": 1,
         "replan_flag": False,
         "replan_attempts": {},
+        "chart_path": None,
+        "chart_notes": None,
     }
 
     final_state = active_graph.invoke(initial_state)
