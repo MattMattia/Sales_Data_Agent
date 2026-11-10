@@ -1,0 +1,55 @@
+# Sales Data Agent: Streamlit app (8501) + TruLens dashboard (8001) sharing one
+# persistent TruLens database volume. Secrets come from an optional local .env.
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  sales-data-agent:
+    <<: *hardening
+    build: .
+    image: sales-data-agent:latest
+    ports:
+      - "8501:8501"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - TRULENS_DATABASE_URL=sqlite:////app/data/default.sqlite
+    volumes:
+      - trulens-data:/app/data
+    restart: unless-stopped
+
+  trulens-dashboard:
+    <<: *hardening
+    image: sales-data-agent:latest
+    ports:
+      - "8001:8001"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - TRULENS_DATABASE_URL=sqlite:////app/data/default.sqlite
+    volumes:
+      - trulens-data:/app/data
+    command:
+      - python
+      - -c
+      - |
+        from trulens.core.database.connector.default import DefaultDBConnector
+        from trulens.core.session import TruSession
+        from trulens.dashboard import run_dashboard
+        session = TruSession(connector=DefaultDBConnector(database_url="sqlite:////app/data/default.sqlite"))
+        run_dashboard(session=session, port=8001, address="0.0.0.0", force=True).wait()
+    healthcheck:
+      disable: true
+    depends_on:
+      sales-data-agent:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  trulens-data:
