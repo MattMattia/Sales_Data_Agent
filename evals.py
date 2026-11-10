@@ -408,15 +408,29 @@ def _feedback_name(feedback: Any) -> str:
     return str(getattr(feedback, "name", type(feedback).__name__))
 
 
+def _recording_record_ids(recording: Any) -> List[str]:
+    """Record ids captured by this TruGraph recording (empty when nothing was recorded)."""
+    records = getattr(recording, "records", None) or []
+    return [str(rid) for rid in (getattr(record, "record_id", None) for record in records) if rid]
+
+
 def _fetch_recorded_feedback(recording: Any = None) -> Dict[str, float]:
     """
-    Reads the latest feedback scores persisted by TruGraph. Returns a
-    {metric_name: score} mapping (empty when nothing has been computed yet).
+    Reads the feedback scores persisted for THIS recording only, so the
+    scorecard never shows another run's results. Returns a
+    {metric_name: score} mapping (empty while nothing has been computed yet).
     """
+    record_ids = _recording_record_ids(recording)
+    if not record_ids:
+        return {}
     session = getattr(recording, "session", None) or TruSession()
-    records_df, feedback_names = session.get_records_and_feedback()
+    records_df, feedback_names = session.get_records_and_feedback(record_ids=record_ids)
     if records_df is None or len(records_df) == 0:
         return {}
+    if "record_id" in records_df.columns:
+        records_df = records_df[records_df["record_id"].isin(record_ids)]
+        if len(records_df) == 0:
+            return {}
     latest = records_df.iloc[-1]
     scores: Dict[str, float] = {}
     for name in feedback_names or []:

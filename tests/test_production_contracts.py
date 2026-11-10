@@ -117,14 +117,22 @@ def test_initialize_chat_model_builds_chat_openai_with_live_key(fake_chat_openai
 # evals: reading persisted TruLens feedback (production mode)
 # ---------------------------------------------------------------------
 
-def _recording(records_df=None, names=None, error=None):
+def _recording(records_df=None, names=None, error=None, record_ids=("rec-current",)):
+    """Stub of a TruLens Recording: its own record ids plus a session that logs queries."""
+    queries = []
+
     class _Session:
-        def get_records_and_feedback(self):
+        def get_records_and_feedback(self, record_ids=None):
+            queries.append(record_ids)
             if error is not None:
                 raise error
             return records_df, names
 
-    return types.SimpleNamespace(session=_Session())
+    return types.SimpleNamespace(
+        session=_Session(),
+        records=[types.SimpleNamespace(record_id=rid) for rid in record_ids],
+        queries=queries,
+    )
 
 
 @pytest.fixture
@@ -229,3 +237,24 @@ def test_consume_stream_treats_null_text_as_empty():
 
     assert text == "ok"
     assert sql == "SELECT 1"
+
+
+def test_fetch_recorded_feedback_reads_only_this_recordings_records(feedback_names):
+    first = feedback_names[0]
+    records = pd.DataFrame([
+        {"record_id": "rec-current", first: 0.95},
+        {"record_id": "rec-other-session", first: 0.10},
+    ])
+    recording = _recording(records, [first], record_ids=("rec-current",))
+
+    scores = evals._fetch_recorded_feedback(recording)
+
+    assert recording.queries == [["rec-current"]]
+    assert scores == {first: 0.95}
+
+
+def test_fetch_recorded_feedback_without_records_is_pending_and_skips_database(feedback_names):
+    recording = _recording(pd.DataFrame([{feedback_names[0]: 0.5}]), feedback_names[:1], record_ids=())
+
+    assert evals._fetch_recorded_feedback(recording) == {}
+    assert recording.queries == []
