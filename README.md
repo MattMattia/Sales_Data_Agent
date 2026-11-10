@@ -63,18 +63,23 @@ flowchart TD
 ```text
 Sales_Data_Agent/
 ├── .env.template          # Environment variables template with configuration guidance
-├── requirements.txt       # Production dependencies with pinned versions
+├── requirements.txt       # Production dependencies with minimum versions
 ├── README.md              # Project documentation, architecture, and setup instructions
 ├── pytest.ini             # Test runner configuration
+├── Dockerfile             # Hardened multi-stage image (non-root, health check, no secrets)
+├── docker-compose.yml     # Streamlit app + TruLens dashboard on a shared data volume
+├── .dockerignore          # Keeps secrets, caches and local state out of the build context
+├── .github/workflows/
+│   └── ci.yml             # CI: quality & secret scan, pytest, mock end-to-end smoke test
 ├── app.py                 # Interactive Streamlit web interface with chat and chart rendering
 ├── state.py               # State schema, Pydantic models, `.env` loading, shared messages & agent registry
 ├── prompts.py             # System prompts, GPA plan prompts, and executor decision prompts
 ├── tools.py               # CortexAgentTool (read-only SQL guardrail), Tavily, sandboxed Python tool
-├── sandbox.py             # AST-validated, restricted-builtins execution of chart code
+├── sandbox.py             # Three-layer sandbox for chart code (AST policy, restricted builtins, isolated subprocess)
 ├── nodes.py               # Orchestrator nodes (planner, executor) & specialized ReAct workers
 ├── graph.py               # StateGraph construction, build_graph(), run_agent() & topology
 ├── evals.py               # TruLens RAG Triad + GPA Alignment evaluation suite & recorder
-└── tests/                 # pytest suite (state/prompts, tools/security, nodes/graph/evals)
+└── tests/                 # pytest suite (see "Testing & Continuous Integration")
 ```
 
 ### Module Breakdown
@@ -85,11 +90,34 @@ Sales_Data_Agent/
 - **[`tools.py`](tools.py)**: Encapsulates external integrations:
   - `CortexAgentTool`: Snowflake Snowpark and Cortex Lite Agent Service runner. Creates the Snowpark session from `SNOWFLAKE_*` variables, uses `SNOWFLAKE_WAREHOUSE`, and only executes single read-only `SELECT`/`WITH` statements. Includes an automatic high-fidelity mock fallback when credentials are not configured.
   - `tavily_tool` / `get_tavily_tool`: Web search with `MockTavilySearch` fallback.
-  - `python_repl_tool` / `PythonREPLTool`: Sandboxed Python shell for plotting charts (import whitelist, blocked builtins/dunders, headless `Agg` backend). An in-process sandbox is defense-in-depth, not an isolation boundary: run the chart agent in an isolated container for untrusted deployments.
+  - `python_repl_tool` / `PythonREPLTool`: Sandboxed Python shell for plotting charts. Code is validated, then executed in a separate, secret-free child process with a timeout (see [Security Architecture](#security-architecture--defense-in-depth)).
   - `query_cortex_agent`, `search_web`, `run_python_code`: `(str) -> str` wrappers given to the ReAct agents; retrieval wrappers emit TruLens `RETRIEVAL` spans.
 - **[`nodes.py`](nodes.py)**: Implements all graph nodes. Encapsulates `planner_node`, `executor_node`, `cortex_agents_research_node`, `web_research_node`, `chart_node`, `chart_summary_node`, and `synthesizer_node`.
 - **[`graph.py`](graph.py)**: Assembles and compiles the `StateGraph(State)`. Exposes `build_graph()`, `run_agent()`, and graph topology visualization functions (`get_graph_mermaid()`, `display_ascii_graph()`).
-- **[`evals.py`](evals.py)**: Configures the 7 evaluation metrics across the RAG Triad and GPA dimensions. Implements `setup_trulens_recorder()` with SQLite persistence and the `@inline_evaluation` decorator.
+- **[`evals.py`](evals.py)**: Configures the 7 evaluation metrics across the RAG Triad and GPA dimensions. Implements `setup_trulens_recorder()` with SQLite persistence (location from `TRULENS_DATABASE_URL`) and the `@inline_evaluation` decorator.
+
+---
+
+## Security Architecture & Defense-in-Depth
+
+The agent executes LLM-generated code and SQL, so every path that touches code, data, or credentials has more than one guard.
+
+### Chart code sandbox (`sandbox.py`)
+
+| Layer | What it does | What it stops |
+|-------|--------------|---------------|
+| 1. AST policy | Parses the code before running it: import allowlist (`matplotlib`, `seaborn`, `pandas`, `numpy`, ...), forbidden builtins (`eval`, `exec`, `open`, `getattr`, ...), and forbidden attributes (dunders, private members, `os`, `subprocess`, `environ`, ...). | Imports of OS/process modules, reflection escapes, file access. |
+| 2. Restricted builtins | Runs the code with a minimal `__builtins__` and a whitelist-checking `__import__`, on the headless `Agg` backend. | Anything layer 1 could miss at runtime. |
+| 3. Process isolation | Runs validated code in a short-lived child interpreter (`python -I`) with an allowlisted environment (no variable containing `KEY`, `SECRET`, `TOKEN`, `PASSWORD`) and a hard timeout (15 s by default). | Credential theft from process memory or env, infinite loops (`while True: pass`), crashes of the Streamlit process. |
+
+If process creation is unavailable (for example in a restricted embedded runtime), execution falls back to layers 1 and 2 in-process and logs a warning. The child shares the host filesystem and network, so internet-facing deployments should run inside the provided Docker image.
+
+### Data and credentials
+
+- **Read-only SQL guardrail**: `CortexAgentTool` only executes a single `SELECT`/`WITH` statement; DML, DDL, multiple statements, and dangerous functions are rejected before reaching Snowflake. The warehouse name is validated as an identifier.
+- **Least-privilege role**: `.env.template` uses `SNOWFLAKE_ROLE=SALES_ANALYST_RO`; a test fails if `ACCOUNTADMIN` is ever reintroduced.
+- **Chart path sanitization**: the `CHART_PATH` reported by the chart agent is resolved and only accepted inside the working directory with an image extension, so the UI never reads arbitrary files.
+- **Secrets stay out of artifacts**: `.env` files are git- and docker-ignored, the image runs as the unprivileged `appuser`, and CI scans tracked files for leaked keys.
 
 ---
 
@@ -256,11 +284,55 @@ python -c "from trulens.dashboard import run_dashboard; run_dashboard(port=8001)
 ```
 Navigate to `http://localhost:8001` in your browser to explore execution traces, latency, token consumption, and feedback distributions.
 
-### 5. Run the Test Suite
+---
+
+## Running with Docker & Docker Compose
+
+Start the Streamlit app and the TruLens dashboard together:
+
+```bash
+docker compose up --build
+```
+
+| Service | URL | Purpose |
+|---------|-----|---------|
+| `sales-data-agent` | http://localhost:8501 | Streamlit chat interface |
+| `trulens-dashboard` | http://localhost:8001 | TruLens traces and feedback (starts once the app is healthy) |
+
+How it is wired:
+
+- **Credentials**: an optional `.env` in the project root is injected at runtime (`env_file`, `required: false`). Without it, everything runs in Mock Fallback mode. Secrets are never copied into the image.
+- **Persistence**: both services mount the `trulens-data` volume at `/app/data` and use `TRULENS_DATABASE_URL=sqlite:////app/data/default.sqlite`, so records survive restarts and the dashboard reads what the app writes. Real TruLens records require `OPENAI_API_KEY`; in mock mode the database stays empty.
+- **Hardening**: the image runs as `appuser` (UID 10001), checks `/_stcore/health`, and the containers drop all Linux capabilities with `no-new-privileges`.
+
+Stop the stack with `docker compose down` (add `-v` only if you want to delete the TruLens data volume).
+
+---
+
+## Testing & Continuous Integration
+
+Run the full suite locally:
+
 ```bash
 python -m pytest -v
 ```
-The suite forces Mock Fallback mode (no network, no `.env`) and covers schemas, prompts, the SQL guardrail, the Python sandbox, planner/executor routing, chart flows, and evaluations.
+
+The suite forces Mock Fallback mode (no network, no `.env`), so it is deterministic and free to run.
+
+| Test module | What it validates |
+|-------------|-------------------|
+| `test_state_and_prompts.py` | Pydantic schemas, `.env` loading, prompts, and the `.env.template` least-privilege contract. |
+| `test_tools_and_security.py` | Mock integrations, the read-only SQL guardrail, and all three sandbox layers (policy, timeout, secret-free child). |
+| `test_nodes_and_graph.py` | Planner/executor routing, replanning limits, chart flows, and end-to-end graph runs. |
+| `test_production_contracts.py` | Production code paths without network: Cortex SSE parsing and fallback, `ChatOpenAI` construction, TruLens feedback reading, `RETRIEVAL` span attributes, database URL resolution. |
+| `test_streamlit_app.py` | The real UI via Streamlit `AppTest`: initial load, chat answers with plan and 7-metric scorecard, chart persistence, clearing history, no deprecation warnings. |
+| `test_container_config.py` | Docker invariants: non-root user, health check, `Agg` backend, no `.env` in the image, shared TruLens volume. |
+
+[GitHub Actions](.github/workflows/ci.yml) runs on pushes to `main`, `fix/**`, `feat/**`, and on pull requests to `main`, with read-only permissions and cancellation of superseded runs:
+
+1. **quality-and-security**: installs dependencies on Python 3.12, compiles every module, and scans tracked files for leaked secrets or committed `.env` files.
+2. **test-suite**: `pytest -v --tb=short`.
+3. **e2e-smoke-test**: `python graph.py` and `python evals.py` in Mock Fallback mode.
 
 ---
 
