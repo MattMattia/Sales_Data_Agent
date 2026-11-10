@@ -3,16 +3,21 @@ tools.py - Integration tools for the Multi-Agent architecture:
 1. TavilySearch: Real-time web search with fallback for local/offline execution.
 2. CortexAgentTool: Hybrid integration with Snowflake Cortex (Analyst Text-to-SQL
    and semantic Cortex Search) with synthetic fallback/mock when active credentials are absent.
-3. python_repl_tool: Secure in-memory Python execution environment for saving charts to disk.
+   Generated SQL passes a read-only guardrail before execution.
+3. python_repl_tool: AST-sandboxed Python execution environment for saving charts to disk.
+4. LangChain-friendly wrappers with clean `(str) -> str` signatures
+   (query_cortex_agent, search_web, run_python_code), instrumented as TruLens
+   RETRIEVAL spans when TruLens is installed.
 """
 
-import os
-import sys
-import io
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple, Type
-from contextlib import redirect_stdout, redirect_stderr
+import os
+import re
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type
+
+from state import load_environment  # noqa: F401 - importing state loads `.env` first
+from sandbox import execute_sandboxed
 
 try:
     from pydantic import BaseModel, Field, PrivateAttr
@@ -27,6 +32,38 @@ except ImportError:
         return default
 
 logger = logging.getLogger("sales_data_agent.tools")
+
+
+# =====================================================================
+# 0. TruLens RETRIEVAL span instrumentation (optional)
+# =====================================================================
+
+def _retrieval_attributes(ret: Any, exception: Any, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+    from trulens.otel.semconv.trace import SpanAttributes
+    query = kwargs.get("query", args[0] if args else "")
+    return {
+        SpanAttributes.RETRIEVAL.QUERY_TEXT: str(query),
+        SpanAttributes.RETRIEVAL.RETRIEVED_CONTEXTS: [str(ret)] if ret else [],
+    }
+
+
+def instrument_retrieval(func: Callable) -> Callable:
+    """
+    Marks `func` as a TruLens RETRIEVAL span (QUERY_TEXT + RETRIEVED_CONTEXTS),
+    which Groundedness and Context Relevance selectors require. No-op when
+    TruLens is not installed, so Mock Fallback keeps working.
+    """
+    try:
+        from trulens.core.otel.instrument import instrument
+        from trulens.otel.semconv.trace import SpanAttributes
+    except ImportError:
+        return func
+    try:
+        return instrument(span_type=SpanAttributes.SpanType.RETRIEVAL, attributes=_retrieval_attributes)(func)
+    except Exception as exc:  # pragma: no cover - defensive against TruLens API drift
+        logger.warning(f"TruLens retrieval instrumentation unavailable: {exc}")
+        return func
+
 
 # =====================================================================
 # 1. Tavily Search Tool Configuration (Web Research)
@@ -101,12 +138,147 @@ def get_tavily_tool(max_results: int = 5):
 tavily_tool = get_tavily_tool(max_results=5)
 
 
+def _format_search_results(raw: Any) -> str:
+    items = raw.get("results", raw) if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        return str(items)
+    lines = []
+    for item in items:
+        if isinstance(item, dict):
+            lines.append(f"- {item.get('title', '')}: {item.get('content', '')} (source: {item.get('url', '')})")
+        else:
+            lines.append(f"- {item}")
+    return "\n".join(lines) if lines else "No web results found."
+
+
+@instrument_retrieval
+def search_web(query: str) -> str:
+    """Search the public web for news, market data, and regulatory updates. Returns results with source URLs."""
+    return _format_search_results(tavily_tool.invoke({"query": query}))
+
+
 # =====================================================================
 # 2. Snowflake Cortex Agent Tool (Cortex Analyst + Cortex Search)
 # =====================================================================
 
 SEMANTIC_MODEL_FILE = "@sales_intelligence.data.models/sales_metrics_model.yaml"
 CORTEX_SEARCH_SERVICE = "sales_intelligence.data.sales_conversation_search"
+DEFAULT_WAREHOUSE = "SALES_INTELLIGENCE_WH"
+
+_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]{0,254}$")
+_READONLY_FIRST_TOKENS = frozenset({"SELECT", "WITH"})
+_FORBIDDEN_SQL_KEYWORDS = frozenset({
+    "DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "TRUNCATE", "CREATE",
+    "REPLACE", "GRANT", "REVOKE", "COPY", "PUT", "REMOVE", "CALL",
+    "EXECUTE", "MERGE", "UNDROP", "USE",
+})
+_SCALAR_FUNCTION_CALL_RE = re.compile(r"\b(?:REPLACE|INSERT)\s*\(", re.IGNORECASE)
+
+
+def _normalize_sql(sql: str) -> Optional[str]:
+    """
+    Removes comments and replaces string literals / quoted identifiers with
+    placeholders using a quote-aware scanner, so neither `'--'` nor `';'`
+    inside literals can hide statements. Returns None on unterminated quotes
+    or block comments.
+    """
+    out: List[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        ch, nxt = sql[i], sql[i + 1] if i + 1 < n else ""
+        if ch == "-" and nxt == "-":
+            end = sql.find("\n", i)
+            i = n if end == -1 else end
+        elif ch == "/" and nxt == "*":
+            end = sql.find("*/", i + 2)
+            if end == -1:
+                return None
+            out.append(" ")
+            i = end + 2
+        elif ch == "$" and nxt == "$":
+            end = sql.find("$$", i + 2)
+            if end == -1:
+                return None
+            out.append(" '' ")
+            i = end + 2
+        elif ch in ("'", '"'):
+            j = i + 1
+            while j < n:
+                if sql[j] == ch and j + 1 < n and sql[j + 1] == ch:
+                    j += 2  # escaped quote ('' or "")
+                elif sql[j] == "\\" and ch == "'":
+                    j += 2
+                elif sql[j] == ch:
+                    break
+                else:
+                    j += 1
+            if j >= n:
+                return None
+            out.append(" '' " if ch == "'" else " ident ")
+            i = j + 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _is_safe_readonly_sql(sql: str) -> bool:
+    """
+    Read-only guardrail for model-generated SQL. Accepts a single SELECT/WITH
+    statement (one optional trailing ';') with no mutating/administrative keyword.
+    """
+    if not sql or not sql.strip():
+        return False
+    normalized = _normalize_sql(sql)
+    if normalized is None:
+        return False
+    body = normalized.strip().rstrip(";").strip()
+    if not body or ";" in body:
+        return False
+    # REPLACE(...) and INSERT(...) are also Snowflake string functions: allow them only as calls.
+    body = _SCALAR_FUNCTION_CALL_RE.sub(" fn(", body)
+    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_$]*", body.upper())
+    if not tokens or tokens[0] not in _READONLY_FIRST_TOKENS:
+        return False
+    return not any(token in _FORBIDDEN_SQL_KEYWORDS for token in tokens)
+
+
+def configured_warehouse() -> str:
+    """Returns SNOWFLAKE_WAREHOUSE when it is a valid SQL identifier, else the default."""
+    warehouse = os.getenv("SNOWFLAKE_WAREHOUSE", DEFAULT_WAREHOUSE).strip()
+    if _SQL_IDENTIFIER_RE.match(warehouse):
+        return warehouse
+    logger.error("Security: SNOWFLAKE_WAREHOUSE is not a valid SQL identifier. Using default warehouse.")
+    return DEFAULT_WAREHOUSE
+
+
+def _has_snowflake_credentials() -> bool:
+    return bool(os.getenv("SNOWFLAKE_ACCOUNT") and os.getenv("SNOWFLAKE_USER") and os.getenv("SNOWFLAKE_PASSWORD"))
+
+
+def snowflake_connection_params() -> Dict[str, str]:
+    """Builds Snowpark connection parameters from SNOWFLAKE_* environment variables."""
+    mapping = {
+        "account": "SNOWFLAKE_ACCOUNT",
+        "user": "SNOWFLAKE_USER",
+        "password": "SNOWFLAKE_PASSWORD",
+        "role": "SNOWFLAKE_ROLE",
+        "warehouse": "SNOWFLAKE_WAREHOUSE",
+        "database": "SNOWFLAKE_DATABASE",
+        "schema": "SNOWFLAKE_SCHEMA",
+    }
+    return {key: os.environ[env] for key, env in mapping.items() if os.getenv(env)}
+
+
+def create_snowpark_session() -> Optional[Any]:
+    """Creates a Snowpark session from environment credentials, or None on failure."""
+    try:
+        from snowflake.snowpark import Session
+        return Session.builder.configs(snowflake_connection_params()).create()
+    except Exception as exc:
+        # Never log the parameters: they include the password.
+        logger.warning(f"Could not create Snowpark session ({type(exc).__name__}). Using Mock mode.")
+        return None
 
 
 class CortexAgentArgs(BaseModel):
@@ -125,21 +297,20 @@ class CortexAgentTool:
     description: str = "answers questions using sales conversations and metrics"
     args_schema: Type[CortexAgentArgs] = CortexAgentArgs
 
-    _session: Optional[Any] = PrivateAttr(default=None)
-    _root: Optional[Any] = PrivateAttr(default=None)
-    _agent_service: Optional[Any] = PrivateAttr(default=None)
-    _is_mock: bool = PrivateAttr(default=False)
-
     def __init__(self, session: Optional[Any] = None):
-        super().__init__()
+        self._session: Optional[Any] = None
+        self._root: Optional[Any] = None
+        self._agent_service: Optional[Any] = None
+        self._is_mock: bool = True
 
-        has_snowflake_creds = bool(
-            os.getenv("SNOWFLAKE_ACCOUNT") and
-            os.getenv("SNOWFLAKE_USER") and
-            os.getenv("SNOWFLAKE_PASSWORD")
-        )
+        if not _has_snowflake_credentials():
+            logger.info("[CortexAgentTool] Fallback/Mock mode enabled (no Snowflake credentials).")
+            return
 
-        if session is not None and has_snowflake_creds:
+        if session is None:
+            session = create_snowpark_session()
+
+        if session is not None:
             try:
                 from snowflake.core import Root
                 self._session = session
@@ -151,8 +322,7 @@ class CortexAgentTool:
             except Exception as e:
                 logger.warning(f"Error initializing Snowflake Cortex service: {e}. Enabling Mock mode.")
 
-        # Fallback / Mock mode
-        self._is_mock = True
+        self._session = None
         logger.info("[CortexAgentTool] Fallback/Mock mode enabled (no active Snowflake connection).")
 
     def _build_request(self, query: str):
@@ -264,6 +434,17 @@ class CortexAgentTool:
 
         return text, str(citations), sql, results_str
 
+    def _execute_sql(self, sql: str) -> str:
+        if not _is_safe_readonly_sql(sql):
+            logger.error("Security: rejected non read-only SQL generated by Cortex Analyst.")
+            return "SQL execution blocked: only single read-only SELECT/WITH statements are allowed."
+        try:
+            self._session.sql(f"USE WAREHOUSE {configured_warehouse()}").collect()
+            df = self._session.sql(sql.strip().rstrip(";")).to_pandas()
+            return df.to_string(index=False)
+        except Exception as e:
+            return f"SQL execution error: {e}"
+
     def run(self, query: str, **kwargs) -> Tuple[str, str, str, str]:
         """
         Executes query against Cortex Agent Service or the Mock fallback engine.
@@ -277,29 +458,30 @@ class CortexAgentTool:
             req = self._build_request(query)
             stream = self._agent_service.run(req)
             text, sql, citations = self._consume_stream(stream)
-
-            results_str = ""
-            if sql:
-                try:
-                    # Ensure explicit warehouse selection prior to execution
-                    self._session.sql("USE WAREHOUSE SALES_INTELLIGENCE_WH").collect()
-                    df = self._session.sql(sql.rstrip(";")).to_pandas()
-                    results_str = df.to_string(index=False)
-                except Exception as e:
-                    results_str = f"SQL execution error: {e}"
-
+            results_str = self._execute_sql(sql) if sql else ""
             return text, str(citations), sql, results_str
 
         except Exception as exc:
             logger.error(f"Error in production CortexAgentTool: {exc}. Falling back to mock response.")
             return self._run_mock(query)
 
+    def format_output(self, query: str) -> str:
+        """Runs the query and renders the 4-tuple as labelled text for LLM agents."""
+        text, citations, _sql, results_str = self.run(query)
+        return f"{text}\n\nResults:\n{results_str}\n\nCitations: {citations}"
+
     def __call__(self, query: str, **kwargs) -> Tuple[str, str, str, str]:
         return self.run(query, **kwargs)
 
 
-# Default initialization of CortexAgentTool
+# Default initialization of CortexAgentTool (creates a Snowpark session when credentials exist)
 cortex_agent_tool = CortexAgentTool(session=None)
+
+
+@instrument_retrieval
+def query_cortex_agent(query: str) -> str:
+    """Answer questions about CRM customer deals, sales metrics, and customer meeting notes using Snowflake Cortex."""
+    return cortex_agent_tool.format_output(query)
 
 
 # =====================================================================
@@ -308,70 +490,34 @@ cortex_agent_tool = CortexAgentTool(session=None)
 
 class PythonREPLTool:
     """
-    In-memory Python execution tool for generating and persisting charts to disk.
-    Captures stdout and errors safely without heavy external dependencies.
+    Sandboxed Python execution tool for generating and persisting charts to disk.
+    Code is AST-validated (see sandbox.py) before running with restricted builtins.
     """
     name: str = "python_repl"
-    description: str = "A Python shell to execute code and save charts to disk."
-
-    def __init__(self):
-        pass
+    description: str = "A sandboxed Python shell (matplotlib, seaborn, pandas, numpy) to plot and save charts."
 
     def run(self, code: str) -> str:
-        """
-        Executes provided Python code and captures standard output.
-        """
-        # Strip markdown fences if emitted by the LLM
-        clean_code = code.strip()
-        if clean_code.startswith("```python"):
-            clean_code = clean_code[9:]
-        elif clean_code.startswith("```"):
-            clean_code = clean_code[3:]
-        if clean_code.endswith("```"):
-            clean_code = clean_code[:-3]
-        clean_code = clean_code.strip()
-
-        stdout_buffer = io.StringIO()
-        stderr_buffer = io.StringIO()
-
-        # Enriched execution scope with standard visualization libraries
-        local_scope: Dict[str, Any] = {}
-        global_scope: Dict[str, Any] = {
-            "__name__": "__main__",
-            "os": os,
-            "sys": sys,
-        }
-
-        # Inject common data analysis libraries if available in the environment
-        for lib in ("matplotlib", "matplotlib.pyplot", "pandas", "numpy", "seaborn"):
-            try:
-                mod_name = lib.split(".")[-1] if "." in lib else lib
-                global_scope[mod_name] = __import__(lib, fromlist=["*"])
-            except ImportError:
-                pass
-
-        try:
-            with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-                exec(clean_code, global_scope, local_scope)
-            output = stdout_buffer.getvalue()
-            errors = stderr_buffer.getvalue()
-            return output if output else (f"Executed successfully (warnings: {errors})" if errors else "Executed successfully without output.")
-        except Exception as err:
-            return f"Python execution error: {type(err).__name__}: {str(err)}"
+        """Validates and executes the provided Python code, returning captured stdout."""
+        result = execute_sandboxed(code)
+        if result.startswith("Python execution blocked"):
+            logger.warning(f"[PythonREPLTool] {result}")
+        return result
 
     def __call__(self, code: str) -> str:
         return self.run(code)
 
 
-def get_python_repl_tool():
+def get_python_repl_tool() -> PythonREPLTool:
     """
-    Instantiates and returns the REPL tool for LangChain / LangGraph.
+    Returns the sandboxed REPL tool. The unsandboxed langchain_experimental
+    PythonREPLTool is intentionally never used (remote code execution risk).
     """
-    try:
-        from langchain_experimental.tools.python.tool import PythonREPLTool as LCExperimentalREPL
-        return LCExperimentalREPL()
-    except ImportError:
-        return PythonREPLTool()
+    return PythonREPLTool()
 
 
 python_repl_tool = get_python_repl_tool()
+
+
+def run_python_code(code: str) -> str:
+    """Execute sandboxed Python (matplotlib/seaborn/pandas/numpy only) to build and save charts. Use print() to show output."""
+    return python_repl_tool.run(code)
