@@ -58,7 +58,14 @@ FORBIDDEN_ATTRIBUTES = frozenset({
     "system", "popen", "spawn", "spawnl", "spawnv", "execv", "execve",
     "execl", "fork", "kill", "remove", "unlink", "rmdir", "rmtree",
     "environ", "getenv", "putenv", "load_library", "LoadLibrary",
+    # Library-level file readers/writers that bypass the `open` ban
+    # (e.g. `pd.read_csv('.env')` would leak secrets from the working directory).
+    "io", "load", "loadtxt", "genfromtxt", "fromfile", "fromregex", "memmap",
+    "imread", "to_pickle", "DataSource",
 })
+
+# Any attribute starting with these prefixes is a file/URL reader (pandas `read_*`).
+FORBIDDEN_ATTRIBUTE_PREFIXES = ("read_",)
 
 SAFE_BUILTIN_NAMES = (
     "abs", "all", "any", "bool", "dict", "enumerate", "filter", "float",
@@ -127,7 +134,7 @@ def _check_module(module_name: str) -> None:
 def _check_attribute_name(attr: str) -> None:
     if attr.startswith("_"):
         raise SandboxViolation(f"access to private/dunder attribute '{attr}' is not allowed")
-    if attr in FORBIDDEN_ATTRIBUTES or attr in FORBIDDEN_CALLS:
+    if attr in FORBIDDEN_ATTRIBUTES or attr in FORBIDDEN_CALLS or attr.startswith(FORBIDDEN_ATTRIBUTE_PREFIXES):
         raise SandboxViolation(f"access to attribute '{attr}' is not allowed")
 
 

@@ -353,3 +353,34 @@ def test_sandbox_falls_back_in_process_when_subprocess_unavailable(monkeypatch):
     monkeypatch.setattr(sandbox.subprocess, "run", broken_run)
 
     assert sandbox.execute_sandboxed("print(sum([1, 2, 3]))").strip() == "6"
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "import pandas as pd\nprint(pd.read_csv('.env', sep='@@', header=None, engine='python'))",
+        "import pandas as pd\nprint(pd.read_json('secrets.json'))",
+        "import numpy as np\nprint(np.loadtxt('.env', dtype=str))",
+        "import numpy as np\nprint(np.genfromtxt('.env', dtype=str))",
+        "import numpy as np\nprint(np.fromfile('.env'))",
+        "import numpy as np\nprint(np.load('data.npy'))",
+        "import matplotlib.pyplot as plt\nprint(plt.imread('.env'))",
+        "import pandas as pd\npd.DataFrame().to_pickle('payload.pkl')",
+    ],
+)
+def test_sandbox_blocks_library_file_readers(code):
+    assert sandbox.execute_sandboxed(code).startswith("Python execution blocked by security policy")
+
+
+def test_sandbox_still_allows_saving_charts_and_building_frames(isolated_cwd):
+    code = (
+        "import pandas as pd\n"
+        "import matplotlib.pyplot as plt\n"
+        "df = pd.DataFrame({'deal': ['A', 'B'], 'value': [3, 5]})\n"
+        "plt.bar(df['deal'], df['value'])\n"
+        "plt.savefig('deals.png')\n"
+        "print(df['value'].sum())"
+    )
+
+    assert sandbox.execute_sandboxed(code).strip() == "8"
+    assert (isolated_cwd / "deals.png").exists()

@@ -106,7 +106,7 @@ The agent executes LLM-generated code and SQL, so every path that touches code, 
 
 | Layer | What it does | What it stops |
 |-------|--------------|---------------|
-| 1. AST policy | Parses the code before running it: import allowlist (`matplotlib`, `seaborn`, `pandas`, `numpy`, ...), forbidden builtins (`eval`, `exec`, `open`, `getattr`, ...), and forbidden attributes (dunders, private members, `os`, `subprocess`, `environ`, ...). | Imports of OS/process modules, reflection escapes, file access. |
+| 1. AST policy | Parses the code before running it: import allowlist (`matplotlib`, `seaborn`, `pandas`, `numpy`, ...), forbidden builtins (`eval`, `exec`, `open`, `getattr`, ...), and forbidden attributes (dunders, private members, `os`, `subprocess`, `environ`, and library file readers such as `pd.read_*`, `np.loadtxt`, `plt.imread`). | Imports of OS/process modules, reflection escapes, reading files such as `.env` through allowed libraries. |
 | 2. Restricted builtins | Runs the code with a minimal `__builtins__` and a whitelist-checking `__import__`, on the headless `Agg` backend. | Anything layer 1 could miss at runtime. |
 | 3. Process isolation | Runs validated code in a short-lived child interpreter (`python -I`) with an allowlisted environment (no variable containing `KEY`, `SECRET`, `TOKEN`, `PASSWORD`) and a hard timeout (15 s by default). | Credential theft from process memory or env, infinite loops (`while True: pass`), crashes of the Streamlit process. |
 
