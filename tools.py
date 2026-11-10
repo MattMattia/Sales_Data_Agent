@@ -389,10 +389,10 @@ class CortexAgentTool:
                 if not isinstance(item, dict):
                     continue
                 if item.get("type") == "text":
-                    text += str(item.get("text", ""))
+                    text += str(item.get("text") or "")
                 elif item.get("type") == "tool_results":
                     for payload in self._tool_result_payloads(item):
-                        text += str(payload.get("text", ""))
+                        text += str(payload.get("text") or "")
                         sql = payload.get("sql", sql)
                         citations.extend({
                             "source_id": s.get("source_id"),

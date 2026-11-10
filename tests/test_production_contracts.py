@@ -19,7 +19,6 @@ import nodes
 import tools
 from tools import CortexAgentTool
 
-
 # ---------------------------------------------------------------------
 # CortexAgentTool._consume_stream (Snowflake Cortex SSE streaming)
 # ---------------------------------------------------------------------
@@ -218,3 +217,15 @@ def test_recorder_prefers_explicit_database_url_and_defaults_locally(monkeypatch
 
     assert explicit.session.database_url == "sqlite:///custom.sqlite"
     assert default.session.database_url == "sqlite:///default.sqlite"
+
+
+def test_consume_stream_treats_null_text_as_empty():
+    stream = _Stream([
+        _Event({"delta": {"content": [{"type": "text", "text": None}, {"type": "text", "text": "ok"}]}}),
+        _Event({"delta": {"content": [_tool_results_block({"text": None, "sql": "SELECT 1"})]}}),
+    ])
+
+    text, sql, _ = CortexAgentTool()._consume_stream(stream)
+
+    assert text == "ok"
+    assert sql == "SELECT 1"
