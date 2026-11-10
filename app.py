@@ -68,8 +68,11 @@ from artifacts import read_chart_bytes  # noqa: E402
 def get_trulens_recorder() -> Any:
     """
     Returns this browser session's TruGraph (or MockTruGraph) recorder.
-    One recorder per session: a server-wide cached recorder would interleave
-    concurrent users' records and mix up their scorecards.
+    One recorder per session: a TruGraph refuses a second concurrent `with`
+    block ("Already recording with a context manager, cannot nest!"), so a
+    server-wide recorder would fail when two users query at the same time.
+    Wrapping the shared compiled graph again is safe: TruLens skips methods
+    that already carry its instrumentation flag.
     """
     if "trulens_recorder" not in st.session_state:
         st.session_state.trulens_recorder = setup_trulens_recorder(compiled_graph, app_version="Streamlit UI")
