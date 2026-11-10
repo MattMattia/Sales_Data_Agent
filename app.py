@@ -192,12 +192,12 @@ with st.sidebar:
 
     selected_sample = None
     for idx, sq in enumerate(sample_queries):
-        if st.button(f"📌 {sq[:38]}...", key=f"sample_{idx}", use_container_width=True):
+        if st.button(f"📌 {sq[:38]}...", key=f"sample_{idx}", width="stretch"):
             selected_sample = sq
 
     st.markdown("---")
     # Clear conversation history button
-    if st.button("🗑️ Clear Conversation", use_container_width=True):
+    if st.button("🗑️ Clear Conversation", width="stretch"):
         st.session_state.messages = []
         st.rerun()
 
@@ -243,7 +243,7 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if msg.get("chart_bytes"):
-            st.image(msg["chart_bytes"], caption="Generated Visualization", use_container_width=True)
+            st.image(msg["chart_bytes"], caption="Generated Visualization", width="stretch")
         if msg.get("plan"):
             with st.expander("🔍 View Execution Plan"):
                 st.json(msg["plan"])
@@ -309,7 +309,7 @@ if user_query:
             st.markdown(final_answer)
 
             if chart_bytes:
-                st.image(chart_bytes, caption="Generated Visualization", use_container_width=True)
+                st.image(chart_bytes, caption="Generated Visualization", width="stretch")
 
             if execution_plan:
                 with st.expander("🔍 View Multi-Agent Execution Plan"):

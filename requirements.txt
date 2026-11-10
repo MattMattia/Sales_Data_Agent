@@ -34,7 +34,7 @@ matplotlib>=3.8.0
 seaborn>=0.13.0
 
 # --- Web UI & Real-Time File Monitoring ---
-streamlit>=1.38.0
+streamlit>=1.57.0
 watchdog>=4.0.0
 
 # --- Testing ---
