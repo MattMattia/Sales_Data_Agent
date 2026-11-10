@@ -63,7 +63,7 @@ FORBIDDEN_ATTRIBUTES = frozenset({
     "io", "load", "loadtxt", "genfromtxt", "fromfile", "fromregex", "memmap",
     "imread", "DataSource",
     # Library-level file writers (charts may only be written through savefig).
-    "save", "savez", "savez_compressed", "savetxt", "tofile", "imsave",
+    "save", "savez", "savez_compressed", "savetxt", "tofile", "imsave", "dump",
     "to_csv", "to_excel", "to_json", "to_parquet", "to_pickle", "to_html",
     "to_sql", "to_hdf", "to_feather", "to_latex", "to_markdown", "to_stata",
     "to_xml", "to_orc", "to_clipboard", "to_gbq",
@@ -112,6 +112,11 @@ class SandboxViolation(Exception):
 
 
 class _PolicyVisitor(ast.NodeVisitor):
+    def __init__(self) -> None:
+        # savefig references that are the callee of a validated call; any other
+        # reference (alias, argument, return value) would bypass the path check.
+        self._checked_save_refs: set = set()
+
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
             _check_module(alias.name)
@@ -123,15 +128,19 @@ class _PolicyVisitor(ast.NodeVisitor):
         _check_module(node.module or "")
         for alias in node.names:
             _check_attribute_name(alias.name)
+            if alias.name in CHART_SAVE_FUNCTIONS and alias.asname not in (None, alias.name):
+                raise SandboxViolation(f"renaming '{alias.name}' on import is not allowed")
         self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:
         if node.id in FORBIDDEN_CALLS or node.id.startswith("__"):
             raise SandboxViolation(f"use of '{node.id}' is not allowed")
+        self._check_save_reference(node, node.id)
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         _check_attribute_name(node.attr)
+        self._check_save_reference(node, node.attr)
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -139,7 +148,12 @@ class _PolicyVisitor(ast.NodeVisitor):
         name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
         if name in CHART_SAVE_FUNCTIONS:
             _check_chart_save_target(node)
+            self._checked_save_refs.add(id(func))
         self.generic_visit(node)
+
+    def _check_save_reference(self, node: ast.AST, name: str) -> None:
+        if name in CHART_SAVE_FUNCTIONS and id(node) not in self._checked_save_refs:
+            raise SandboxViolation(f"'{name}' may only be called directly with a literal image path")
 
 
 def _check_module(module_name: str) -> None:

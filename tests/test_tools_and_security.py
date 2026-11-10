@@ -420,3 +420,31 @@ def test_sandbox_allows_saving_chart_images_inside_working_dir(target, isolated_
 
     assert sandbox.execute_sandboxed(code).strip() == "ok"
     assert (isolated_cwd / target).exists()
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "import matplotlib.pyplot as plt\ns = plt.savefig\ns('../app.py', format='png')",
+        "import matplotlib.pyplot as plt\nfig = plt.figure()\nsave = fig.savefig\nsave('evil.py', format='png')",
+        "from matplotlib.pyplot import savefig as s\ns('../evil.png')",
+        "from matplotlib.pyplot import savefig\nf = savefig\nf('../evil.png')",
+        "import numpy as np\nnp.zeros(2).dump('payload.pkl')",
+    ],
+)
+def test_sandbox_blocks_aliased_savefig_and_dump(code, isolated_cwd):
+    assert sandbox.execute_sandboxed(code).startswith("Python execution blocked by security policy")
+    assert sorted(p.name for p in isolated_cwd.iterdir()) == []
+
+
+def test_sandbox_allows_direct_savefig_imported_by_name(isolated_cwd):
+    code = (
+        "import matplotlib.pyplot as plt\n"
+        "from matplotlib.pyplot import savefig\n"
+        "plt.bar(['A'], [1])\n"
+        "savefig('chart.png')\n"
+        "print('ok')"
+    )
+
+    assert sandbox.execute_sandboxed(code).strip() == "ok"
+    assert (isolated_cwd / "chart.png").exists()
