@@ -10,7 +10,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Separate groups per event so a pull_request run (whose ref can resolve to
+  # the base branch) never cancels a push run on main, and vice versa.
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 env:
