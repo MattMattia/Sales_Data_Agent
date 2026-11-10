@@ -1,0 +1,42 @@
+# Production Hardening (Phase 2)
+
+Objective: close the 5 residual risks from the audit remediation and add Docker, CI/CD, docs, then merge to `main`.
+Branch: fix/audit-remediation · Delivery: single branch, one commit per work unit, local merge to `main` · Runner: `.venv/Scripts/python -m pytest -v`
+
+## Specs
+
+- S0 Step 0: install ECC `docker-patterns` and `deployment-patterns` into `C:\Users\risso\.agents\skills\` and `C:\Users\risso\.claude\skills\`; copy ECC agents to `~/.claude/agents/`; `gentle-ai skill-registry refresh --force`.
+- S1 (1.1) Test `test_env_template_enforces_least_privilege_and_required_keys` in `tests/test_state_and_prompts.py`: "`SNOWFLAKE_ROLE=SALES_ANALYST_RO` está presente", "Ninguna línea activa asigna `SNOWFLAKE_ROLE=ACCOUNTADMIN`", keys documented: `OPENAI_API_KEY`, `TAVILY_API_KEY`, `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_WAREHOUSE`, `TRULENS_OTEL_TRACING`.
+- S2 (1.2) `execute_sandboxed(code: str, timeout_seconds: float = 15.0) -> str`: keep AST layer intact; after validation run in `subprocess.run([sys.executable, "-c", runner_script], ...)` with sanitized env (drop `OPENAI_API_KEY`, `TAVILY_API_KEY`, `SNOWFLAKE_*` secrets, any var containing `KEY`, `SECRET`, `TOKEN`, `PASSWORD`; keep `MPLBACKEND="Agg"`, `SYSTEMROOT`, `PATH`, `TEMP`, `TMP`, `HOME`, `USERPROFILE`); on timeout return `"Python execution blocked by security policy: execution timed out after ...s"`; child applies `_use_headless_backend()` and `_restricted_builtins()` before `exec()`; on `OSError` fall back to in-memory `exec()`. Tests: `while True: pass` with `timeout_seconds=0.5` returns the timeout message; `OPENAI_API_KEY="sk-secret-test"` is not visible in the child.
+- S3 (1.3) `requirements.txt` `streamlit>=1.57.0`; replace every `use_container_width=True` in `app.py` with `width="stretch"`; AppTest confirms no `use_container_width` deprecation.
+- S4 (1.4.1) `tests/test_production_contracts.py`: `_consume_stream` (dict + JSON-string deltas, text, tool_results with sql + searchResults source_id/doc_id, malformed events ignored) returns exact `(text, sql, citations)`; `run` with `_is_mock=False` and `RuntimeError("network error")` falls back to `_run_mock(query)`; `initialize_chat_model` with `OPENAI_API_KEY="sk-live-test"` builds `ChatOpenAI` with `model_kwargs={"response_format": {"type": "json_object"}}` / `{}`; `_fetch_recorded_feedback` + `evaluate_query_results` with `TRULENS_INSTALLED=True` (0.95, NaN -> None/Pending, DB exception captured); `_retrieval_attributes` formats `QUERY_TEXT` and `RETRIEVED_CONTEXTS`.
+- S5 (1.4.2) `tests/test_streamlit_app.py` with `AppTest`: initial load (welcome, multiselect with 5 default agents, TruLens checkbox on); query via chat_input/sample renders answer, plan and 7 scorecard metrics; chart query `"What are our top 3 customer deals? Chart the deal value for each."` stores `chart_bytes` in `st.session_state.messages`; `"🗑️ Clear Conversation"` clears history.
+- S6 (Fase 2) `.dockerignore`, multi-stage hardened `Dockerfile` (python:3.12-slim, `/opt/venv`, `appuser` UID `10001`, `/app/data`, port 8501, python-based `HEALTHCHECK` on `/_stcore/health`), `docker-compose.yml` (`sales-data-agent` + `trulens-dashboard` on 8001, `trulens-data` volume, `TRULENS_DATABASE_URL=sqlite:////app/data/default.sqlite`, `condition: service_healthy`); test of Docker invariants (`USER appuser`, `HEALTHCHECK`, `MPLBACKEND=Agg`, no `.env` copied).
+- S7 (Fase 3) `.github/workflows/ci.yml`: push `main`, `fix/**`, `feat/**`, PR to `main`; `permissions: contents: read`; concurrency `cancel-in-progress: true`; jobs `quality-and-security` (py 3.12 + pip cache, install, `py_compile`, secret scan), `test-suite` (`pytest -v --tb=short`), `e2e-smoke-test` (`python graph.py`, `python evals.py` in Mock Fallback).
+- S8 (Fase 4) README in English: structure (sandbox.py, Dockerfile, docker-compose.yml, ci.yml, tests/), "Security Architecture & Defense-in-Depth", "Running with Docker & Docker Compose" (`docker compose up --build`, 8501 / 8001), "Testing & Continuous Integration".
+- S9 (Fase 5) Delete `CLAUDE_NEXT_PHASE_MASTER_PROMPT.md`; verification loop (py_compile, pytest, graph.py, evals.py) "0 failed, 0 errors" and no `use_container_width` warning; work-unit commits; `git checkout main && git merge fix/audit-remediation`; clean tree; 6-phase report.
+
+## Tasks
+
+- T0 S0 inline — done (skills installed in both dirs; agents copied with no-clobber 24 -> 79; registry 45 skills)
+- T1 S1 inline — done 37ef6b4 (regression guard: passes on current template; mutation with ACCOUNTADMIN caught)
+- T2 S2 inline — done fff0125 + 93fa5d1 + 8b5eef3 (RED: 3 failed, no `subprocess` in sandbox; GREEN: 112 passed; verifier advisory → file readers blocked, RED 8 failed → GREEN)
+- T3 S3 inline — done d567d5e (RED: `use_container_width` deprecation captured by AppTest spy; GREEN: 5 passed)
+- T4 S4 inline — done 739c17e + 1fd8be2 (RED: KeyError 'tool_results' on malformed block; RED: null text → "None"; GREEN)
+- T5 S5 inline — done d567d5e + 26dadfc (AppTest suite; found and fixed NameError when graph import fails)
+- T6 S6 inline — done b1601c4 + 00dcfc6 (RED: TRULENS_DATABASE_URL ignored; RED: 2 failed, 2 errors on missing files; GREEN; `docker compose config` OK; image build NOT run: Docker daemon off)
+- T7 S7 inline — done 1fc4681 (YAML parsed; secret scan dry-run clean and catches a real-looking key)
+- T8 S8 inline — done 3414e35 + 93fa5d1
+- T9 S9 inline — verification passed (py_compile OK, 143 passed, graph.py exit 0, evals.py exit 0); independent verifier S2/S4/S6 PASS; merge pending
+
+Route evidence: all units are sequential and share the test suite; no parallel-writer or context trigger fired, so the parent writes inline.
+
+## Log
+
+- L1 (2026-11-10) User: "Lee el archivo CLAUDE_NEXT_PHASE_MASTER_PROMPT.md en la raíz del proyecto y ejecuta todas sus fases de principio a fin siguiendo estrictamente las skills del registro .atl/skill-registry.md y descargando las skills faltantes de affaan-m/everything-claude-code."
+- L2 Baseline: 107 passed (Python 3.14.5 venv, Streamlit 1.63.0).
+- L3 Deviations from the prompt, chosen for safety: ECC cloned into the session scratchpad instead of `/tmp`; agents copied with `cp -n` so the 24 existing customized agents were not overwritten; ECC content scanned for injection/exfiltration patterns first (only defensive mentions found). Merge to `main` is local only; pushing `main` stays a user decision.
+- L4 Deviations found while implementing: `run_dashboard()` returns a Process, so compose calls `.wait()` and binds `address="0.0.0.0"` (otherwise the container exits / is unreachable). `TRULENS_DATABASE_URL` was not read by the code; `setup_trulens_recorder` now resolves it. The Agg-backend test now asserts the child backend (rendering moved out of the parent).
+- L5 Independent verifier (security-reviewer): S2, S4, S6 PASS, no blockers. Advisories acted on: library file readers (`pd.read_*`, `np.loadtxt`, `plt.imread`, ...) could read `.env` despite the `open` ban (pre-existing) → blocked; null text rendered as "None" → fixed. Accepted advisories: no memory cap in the child; in-process fallback has no timeout (as specified).
+- L6 Lint: global ruff config reports 173 findings repo-wide (162 at baseline); new ones are only typing-style (`Dict`/`Optional`) matching each file's existing convention. F821 in app.py (pre-existing) fixed in 26dadfc. Types: pyright not installed. Coverage: `coverage` not installed in the venv.
+- L7 Native risk assessment of 4450d83..HEAD: high (process_boundary in sandbox.py, shell_source in ci.yml) → review due.
