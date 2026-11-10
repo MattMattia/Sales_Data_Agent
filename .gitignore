@@ -27,3 +27,6 @@ default.sqlite
 # Generated artifacts
 top_deals_chart.png
 charts/
+
+# Local agent tooling
+.atl/
