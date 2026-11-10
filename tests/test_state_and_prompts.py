@@ -1,5 +1,7 @@
 """Tests for state.py (schemas, configuration, shared constants) and prompts.py."""
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -146,3 +148,43 @@ def test_executor_prompt_reports_step_and_attempts():
     assert "- Current Step Number: 1" in content
     assert "- Replan Attempts for current step: 2" in content
     assert "'chart_summarizer'" in content
+
+
+# ---------------------------------------------------------------------
+# .env.template (least-privilege configuration contract)
+# ---------------------------------------------------------------------
+
+ENV_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / ".env.template"
+REQUIRED_TEMPLATE_KEYS = (
+    "OPENAI_API_KEY",
+    "TAVILY_API_KEY",
+    "SNOWFLAKE_ACCOUNT",
+    "SNOWFLAKE_WAREHOUSE",
+    "TRULENS_OTEL_TRACING",
+)
+
+
+def _active_assignments(text: str) -> dict:
+    """Returns {KEY: value} for every non-comment KEY=value line."""
+    assignments = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        assignments[key.strip()] = value.split("#", 1)[0].strip().strip("\"'")
+    return assignments
+
+
+def test_env_template_enforces_least_privilege_and_required_keys():
+    text = ENV_TEMPLATE_PATH.read_text(encoding="utf-8")
+    assignments = _active_assignments(text)
+
+    assert assignments.get("SNOWFLAKE_ROLE") == "SALES_ANALYST_RO"
+    active_roles = [
+        line for line in text.splitlines()
+        if not line.strip().startswith("#") and line.replace(" ", "").upper().startswith("SNOWFLAKE_ROLE=")
+    ]
+    assert all("ACCOUNTADMIN" not in line.upper() for line in active_roles)
+    missing = [key for key in REQUIRED_TEMPLATE_KEYS if key not in text]
+    assert missing == []
