@@ -525,3 +525,53 @@ def test_savefig_alias_violation_explains_the_literal_path_rule():
     result = sandbox.execute_sandboxed("import matplotlib.pyplot as plt\ns = plt.savefig")
 
     assert "may only be called directly with a literal image path" in result
+
+
+# ---------------------------------------------------------------------
+# Filesystem isolation: the child runs in a throwaway directory
+# ---------------------------------------------------------------------
+
+def test_child_runs_in_a_throwaway_directory_that_is_removed(monkeypatch, isolated_cwd):
+    seen = {}
+    real_run = subprocess.run
+
+    def spy_run(*args, **kwargs):
+        seen["cwd"] = kwargs.get("cwd")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(sandbox.subprocess, "run", spy_run)
+
+    assert sandbox.execute_sandboxed("print(1 + 1)").strip() == "2"
+    assert seen["cwd"] is not None
+    assert os.path.abspath(seen["cwd"]) != os.path.abspath(str(isolated_cwd))
+    assert not os.path.exists(seen["cwd"])
+
+
+def test_files_written_by_unlisted_writers_never_reach_the_working_dir(monkeypatch, isolated_cwd):
+    # Simulate a writer the name denylist does not know about: only the
+    # filesystem isolation stands between it and the app's directory.
+    relaxed = sandbox.FORBIDDEN_ATTRIBUTES - {"lib", "open_memmap"}
+    monkeypatch.setattr(sandbox, "FORBIDDEN_ATTRIBUTES", relaxed)
+    code = (
+        "import numpy as np\n"
+        "m = np.lib.format.open_memmap('stray.npy', mode='w+', dtype='float64', shape=(2,))\n"
+        "m.flush()\n"
+        "print('wrote')"
+    )
+
+    assert sandbox.execute_sandboxed(code).strip() == "wrote"
+    assert not (isolated_cwd / "stray.npy").exists()
+
+
+def test_declared_chart_is_copied_back_creating_its_folder(isolated_cwd):
+    code = "import matplotlib.pyplot as plt\nplt.bar(['A'], [1])\nplt.savefig('reports/q3/deals.png')\nprint('ok')"
+
+    assert sandbox.execute_sandboxed(code).strip() == "ok"
+    assert (isolated_cwd / "reports" / "q3" / "deals.png").read_bytes().startswith(b"\x89PNG")
+    assert sorted(p.name for p in isolated_cwd.iterdir()) == ["reports"]
+
+
+def test_sandbox_blocks_numpy_memmap_writer(isolated_cwd):
+    code = "import numpy as np\nnp.lib.format.open_memmap('x.npy', mode='w+', dtype='float64', shape=(1,))"
+
+    assert sandbox.execute_sandboxed(code).startswith("Python execution blocked by security policy")

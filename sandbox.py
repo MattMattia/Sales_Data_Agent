@@ -7,13 +7,15 @@ Defense-in-depth layers:
 2. Restricted `__builtins__` with a whitelist-checking `__import__`, plus a
    headless matplotlib backend ("Agg") so rendering never touches a GUI thread.
 3. Process isolation: validated code runs in a short-lived child interpreter
-   with an allowlisted environment (no API keys, passwords or tokens) and a
-   hard timeout, so infinite loops or crashes never reach the Streamlit
-   process or the memory that holds its credentials.
+   with an allowlisted environment (no API keys, passwords or tokens), a hard
+   timeout, and a throwaway working directory. Infinite loops or crashes never
+   reach the Streamlit process or the memory that holds its credentials, and
+   files written through relative paths are discarded; only the chart images
+   declared through savefig() are copied back to the app's working directory.
 
-The child process is not a container: it still shares the filesystem and
-network of the host. Run the app itself in the provided Docker image for
-internet-facing deployments.
+The child process is not a container: absolute paths and the network are
+still reachable if a library writer slips past layer 1. Run the app itself in
+the provided Docker image for internet-facing deployments.
 """
 
 import ast
@@ -22,10 +24,13 @@ import io
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 from contextlib import redirect_stderr, redirect_stdout
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 logger = logging.getLogger("sales_data_agent.sandbox")
 
@@ -69,7 +74,7 @@ FORBIDDEN_ATTRIBUTES = frozenset({
     "to_stata", "to_orc", "to_clipboard", "to_gbq",
     # to_xml(stylesheet=...) reads a local file or URL even without a destination.
     "to_xml",
-    "backends", "PdfPages", "ExcelWriter", "HDFStore",
+    "backends", "PdfPages", "ExcelWriter", "HDFStore", "lib", "open_memmap",
 })
 
 # Attribute prefixes for file/URL readers (pandas `read_*`) and matplotlib
@@ -130,6 +135,7 @@ class _PolicyVisitor(ast.NodeVisitor):
         # callee is registered here before visit_Name/visit_Attribute see it; any
         # other reference (alias, argument, return value) would bypass the check.
         self._checked_refs: set = set()
+        self.chart_targets: List[str] = []
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
@@ -161,7 +167,7 @@ class _PolicyVisitor(ast.NodeVisitor):
         func = node.func
         name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
         if name in CHART_SAVE_FUNCTIONS:
-            _check_chart_save_target(node)
+            self.chart_targets.append(_check_chart_save_target(node))
             self._checked_refs.add(id(func))
         elif name in PATH_OPTIONAL_WRITERS:
             _check_pathless_writer(node, name)
@@ -186,8 +192,8 @@ def _check_attribute_name(attr: str) -> None:
         raise SandboxViolation(f"access to attribute '{attr}' is not allowed")
 
 
-def _check_chart_save_target(call: ast.Call) -> None:
-    """savefig() must receive a literal, relative image path with no parent traversal."""
+def _check_chart_save_target(call: ast.Call) -> str:
+    """savefig() must receive a literal, relative image path with no parent traversal; returns it normalized."""
     target = call.args[0] if call.args else next(
         (kw.value for kw in call.keywords if kw.arg == "fname"), None,
     )
@@ -197,6 +203,7 @@ def _check_chart_save_target(call: ast.Call) -> None:
     parts = path.split("/")
     if path.startswith("/") or ":" in path or ".." in parts or not path.lower().endswith(ALLOWED_CHART_EXTENSIONS):
         raise SandboxViolation(f"savefig() target '{target.value}' must be a relative image path inside the working directory")
+    return path
 
 
 def _check_pathless_writer(call: ast.Call, name: str) -> None:
@@ -208,13 +215,18 @@ def _check_pathless_writer(call: ast.Call, name: str) -> None:
         raise SandboxViolation(f"{name}() may only be used without a file destination (writing files is not allowed)")
 
 
-def validate_code_ast(code: str) -> None:
-    """Parses `code` and raises SandboxViolation if it breaks the policy."""
+def validate_code_ast(code: str) -> List[str]:
+    """
+    Parses `code` and raises SandboxViolation if it breaks the policy.
+    Returns the relative chart paths the code declares through savefig().
+    """
     try:
         tree = ast.parse(code, mode="exec")
     except SyntaxError as exc:
         raise SandboxViolation(f"SyntaxError: {exc.msg} (line {exc.lineno})") from exc
-    _PolicyVisitor().visit(tree)
+    visitor = _PolicyVisitor()
+    visitor.visit(tree)
+    return visitor.chart_targets
 
 
 def _safe_import(name: str, globals_: Optional[Dict[str, Any]] = None, locals_: Any = None,
@@ -268,35 +280,61 @@ def execute_sandboxed(code: str, timeout_seconds: float = DEFAULT_TIMEOUT_SECOND
     """
     Validates and executes chart/analysis code, returning captured stdout or
     a descriptive error string. Never raises for user code problems.
+
+    The child runs inside a throwaway directory: anything it writes there is
+    discarded, except the chart images it declared through savefig(), which
+    are copied back to the same relative path in the caller's working dir.
     """
     clean_code = strip_markdown_fences(code)
     try:
-        validate_code_ast(clean_code)
+        chart_targets = validate_code_ast(clean_code)
     except SandboxViolation as violation:
         return f"{BLOCKED_PREFIX}: {violation}"
 
-    try:
-        completed = subprocess.run(
-            [sys.executable, "-I", "-c", _CHILD_RUNNER],
-            input=clean_code,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=build_child_env(),
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return f"{BLOCKED_PREFIX}: execution timed out after {timeout_seconds:g}s"
-    except OSError as exc:
-        logger.warning(f"Sandbox subprocess unavailable ({exc}); executing in-process with restricted builtins.")
-        return _execute_in_process(clean_code)
+    with tempfile.TemporaryDirectory(prefix="sandbox-", ignore_cleanup_errors=True) as workdir:
+        for target in chart_targets:
+            (Path(workdir) / target).parent.mkdir(parents=True, exist_ok=True)
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-I", "-c", _CHILD_RUNNER],
+                input=clean_code,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=build_child_env(),
+                cwd=workdir,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Sandbox child timed out after {timeout_seconds:g}s and was killed.")
+            return f"{BLOCKED_PREFIX}: execution timed out after {timeout_seconds:g}s"
+        except OSError as exc:
+            logger.warning(f"Sandbox subprocess unavailable ({exc}); executing in-process with restricted builtins.")
+            return _execute_in_process(clean_code)
 
-    if completed.returncode != 0:
-        detail = (completed.stderr or "").strip().splitlines()[-1:] or ["no details"]
-        return f"Python execution error: sandbox process exited with code {completed.returncode}: {detail[0]}"
-    return completed.stdout
+        if completed.returncode != 0:
+            detail = (completed.stderr or "").strip().splitlines()[-1:] or ["no details"]
+            logger.warning(f"Sandbox child exited with code {completed.returncode}: {detail[0]}")
+            return f"Python execution error: sandbox process exited with code {completed.returncode}: {detail[0]}"
+        _copy_declared_charts(Path(workdir), chart_targets)
+        return completed.stdout
+
+
+def _copy_declared_charts(workdir: Path, chart_targets: List[str]) -> None:
+    """Copies each declared chart the child produced back into the current working directory."""
+    base = Path.cwd().resolve()
+    for target in dict.fromkeys(chart_targets):
+        source = workdir / target
+        if source.is_symlink() or not source.is_file():
+            continue
+        destination = (base / target).resolve()
+        if base not in destination.parents:
+            logger.error(f"Security: refusing to copy chart outside the working directory: {target}")
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
 
 
 def _execute_in_process(clean_code: str) -> str:
