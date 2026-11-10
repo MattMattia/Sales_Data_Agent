@@ -61,11 +61,20 @@ FORBIDDEN_ATTRIBUTES = frozenset({
     # Library-level file readers/writers that bypass the `open` ban
     # (e.g. `pd.read_csv('.env')` would leak secrets from the working directory).
     "io", "load", "loadtxt", "genfromtxt", "fromfile", "fromregex", "memmap",
-    "imread", "to_pickle", "DataSource",
+    "imread", "DataSource",
+    # Library-level file writers (charts may only be written through savefig).
+    "save", "savez", "savez_compressed", "savetxt", "tofile", "imsave",
+    "to_csv", "to_excel", "to_json", "to_parquet", "to_pickle", "to_html",
+    "to_sql", "to_hdf", "to_feather", "to_latex", "to_markdown", "to_stata",
+    "to_xml", "to_orc", "to_clipboard", "to_gbq",
 })
 
 # Any attribute starting with these prefixes is a file/URL reader (pandas `read_*`).
 FORBIDDEN_ATTRIBUTE_PREFIXES = ("read_",)
+
+# The only file a chart may write: a literal, relative image path inside the working directory.
+CHART_SAVE_FUNCTIONS = frozenset({"savefig"})
+ALLOWED_CHART_EXTENSIONS = (".png", ".jpg", ".jpeg", ".svg")
 
 SAFE_BUILTIN_NAMES = (
     "abs", "all", "any", "bool", "dict", "enumerate", "filter", "float",
@@ -125,6 +134,13 @@ class _PolicyVisitor(ast.NodeVisitor):
         _check_attribute_name(node.attr)
         self.generic_visit(node)
 
+    def visit_Call(self, node: ast.Call) -> None:
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+        if name in CHART_SAVE_FUNCTIONS:
+            _check_chart_save_target(node)
+        self.generic_visit(node)
+
 
 def _check_module(module_name: str) -> None:
     if module_name not in ALLOWED_MODULES:
@@ -136,6 +152,19 @@ def _check_attribute_name(attr: str) -> None:
         raise SandboxViolation(f"access to private/dunder attribute '{attr}' is not allowed")
     if attr in FORBIDDEN_ATTRIBUTES or attr in FORBIDDEN_CALLS or attr.startswith(FORBIDDEN_ATTRIBUTE_PREFIXES):
         raise SandboxViolation(f"access to attribute '{attr}' is not allowed")
+
+
+def _check_chart_save_target(call: ast.Call) -> None:
+    """savefig() must receive a literal, relative image path with no parent traversal."""
+    target = call.args[0] if call.args else next(
+        (kw.value for kw in call.keywords if kw.arg == "fname"), None,
+    )
+    if not (isinstance(target, ast.Constant) and isinstance(target.value, str)):
+        raise SandboxViolation("savefig() requires a literal relative image path")
+    path = target.value.replace("\\", "/")
+    parts = path.split("/")
+    if path.startswith("/") or ":" in path or ".." in parts or not path.lower().endswith(ALLOWED_CHART_EXTENSIONS):
+        raise SandboxViolation(f"savefig() target '{target.value}' must be a relative image path inside the working directory")
 
 
 def validate_code_ast(code: str) -> None:

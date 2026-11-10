@@ -384,3 +384,39 @@ def test_sandbox_still_allows_saving_charts_and_building_frames(isolated_cwd):
 
     assert sandbox.execute_sandboxed(code).strip() == "8"
     assert (isolated_cwd / "deals.png").exists()
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "import pandas as pd\npd.DataFrame({'a': [1]}).to_csv('../escape.csv')",
+        "import pandas as pd\npd.DataFrame({'a': [1]}).to_json('app.py')",
+        "import pandas as pd\npd.DataFrame({'a': [1]}).to_excel('out.xlsx')",
+        "import numpy as np\nnp.save('payload.npy', np.zeros(2))",
+        "import numpy as np\nnp.savetxt('payload.txt', np.zeros(2))",
+        "import numpy as np\nnp.zeros(2).tofile('payload.bin')",
+        "import matplotlib.pyplot as plt\nplt.savefig('../outside.png')",
+        "import matplotlib.pyplot as plt\nplt.savefig('C:/Windows/evil.png')",
+        "import matplotlib.pyplot as plt\nplt.savefig('/etc/evil.png')",
+        "import matplotlib.pyplot as plt\nplt.savefig('app.py')",
+        "import matplotlib.pyplot as plt\nname = 'chart.png'\nplt.savefig(name)",
+        "import matplotlib.pyplot as plt\nfig = plt.figure()\nfig.savefig(fname='../x.png')",
+    ],
+)
+def test_sandbox_blocks_file_writes_outside_chart_images(code, isolated_cwd):
+    assert sandbox.execute_sandboxed(code).startswith("Python execution blocked by security policy")
+    assert sorted(p.name for p in isolated_cwd.iterdir()) == []
+
+
+@pytest.mark.parametrize("target", ["chart.png", "charts/deals.svg", "top_deals_chart.jpeg"])
+def test_sandbox_allows_saving_chart_images_inside_working_dir(target, isolated_cwd):
+    (isolated_cwd / "charts").mkdir()
+    code = (
+        "import matplotlib.pyplot as plt\n"
+        "plt.bar(['A'], [1])\n"
+        f"plt.savefig({target!r})\n"
+        "print('ok')"
+    )
+
+    assert sandbox.execute_sandboxed(code).strip() == "ok"
+    assert (isolated_cwd / target).exists()
