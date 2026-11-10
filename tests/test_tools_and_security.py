@@ -512,3 +512,16 @@ def test_sandbox_blocks_to_string_with_a_file_destination(isolated_cwd):
 
     assert result.startswith("Python execution blocked by security policy")
     assert not (isolated_cwd / "table.txt").exists()
+
+
+def test_sandbox_blocks_to_xml_even_without_destination(isolated_cwd):
+    # to_xml's `stylesheet` argument reads a local file or URL, so it stays fully blocked.
+    result = sandbox.execute_sandboxed(FRAME + "print(df.to_xml(stylesheet='.env'))")
+
+    assert result.startswith("Python execution blocked by security policy")
+
+
+def test_savefig_alias_violation_explains_the_literal_path_rule():
+    result = sandbox.execute_sandboxed("import matplotlib.pyplot as plt\ns = plt.savefig")
+
+    assert "may only be called directly with a literal image path" in result

@@ -67,6 +67,8 @@ FORBIDDEN_ATTRIBUTES = frozenset({
     "save", "savez", "savez_compressed", "savetxt", "tofile", "imsave", "dump",
     "to_excel", "to_parquet", "to_pickle", "to_sql", "to_hdf", "to_feather",
     "to_stata", "to_orc", "to_clipboard", "to_gbq",
+    # to_xml(stylesheet=...) reads a local file or URL even without a destination.
+    "to_xml",
     "backends", "PdfPages", "ExcelWriter", "HDFStore",
 })
 
@@ -81,7 +83,7 @@ ALLOWED_CHART_EXTENSIONS = (".png", ".jpg", ".jpeg", ".svg")
 # pandas formatters that return a string when called without a destination but
 # write a file when given one: allowed only as direct calls with no path.
 PATH_OPTIONAL_WRITERS = frozenset({
-    "to_csv", "to_json", "to_html", "to_latex", "to_markdown", "to_xml", "to_string",
+    "to_csv", "to_json", "to_html", "to_latex", "to_markdown", "to_string",
 })
 _DESTINATION_KEYWORDS = frozenset({"path_or_buf", "path_or_buffer", "buf", "path", "fname", "excel_writer"})
 _GUARDED_CALLABLES = CHART_SAVE_FUNCTIONS | PATH_OPTIONAL_WRITERS
@@ -168,7 +170,8 @@ class _PolicyVisitor(ast.NodeVisitor):
 
     def _check_guarded_reference(self, node: ast.AST, name: str) -> None:
         if name in _GUARDED_CALLABLES and id(node) not in self._checked_refs:
-            raise SandboxViolation(f"'{name}' may only be called directly")
+            rule = "with a literal image path" if name in CHART_SAVE_FUNCTIONS else "without a file destination"
+            raise SandboxViolation(f"'{name}' may only be called directly {rule}")
 
 
 def _check_module(module_name: str) -> None:
