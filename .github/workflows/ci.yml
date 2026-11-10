@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "fix/**", "feat/**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  MPLBACKEND: Agg
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  quality-and-security:
+    name: Quality & security
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Static compilation
+        run: python -m py_compile state.py prompts.py sandbox.py tools.py nodes.py graph.py evals.py app.py
+
+      - name: Scan tracked files for leaked secrets
+        run: |
+          pattern='(sk-(proj-)?[A-Za-z0-9_-]{20,}|tvly-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xox[baprs]-[A-Za-z0-9-]{10,})'
+          placeholders='your-|-here|example|placeholder|dummy|xxxx'
+          matches=$(git ls-files -z | xargs -0 grep -I -n -E "$pattern" | grep -v -i -E "$placeholders" || true)
+          if [ -n "$matches" ]; then
+            echo "$matches"
+            echo "::error::Potential secret committed to the repository (see matches above)."
+            exit 1
+          fi
+          tracked_env=$(git ls-files | grep -E '(^|/)\.env($|\.)' | grep -v -E '(^|/)\.env\.template$' || true)
+          if [ -n "$tracked_env" ]; then
+            echo "::error::Environment files must not be committed: $tracked_env"
+            exit 1
+          fi
+          echo "No secrets detected."
+
+  test-suite:
+    name: Test suite
+    needs: quality-and-security
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pytest
+        run: python -m pytest -v --tb=short
+
+  e2e-smoke-test:
+    name: E2E smoke test (Mock Fallback)
+    needs: quality-and-security
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SALES_AGENT_SKIP_DOTENV: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the multi-agent graph end to end
+        run: python graph.py
+
+      - name: Run the TruLens evaluation suite
+        run: python evals.py
