@@ -283,7 +283,10 @@ def execute_sandboxed(code: str, timeout_seconds: float = DEFAULT_TIMEOUT_SECOND
 
     The child runs inside a throwaway directory: anything it writes there is
     discarded, except the chart images it declared through savefig(), which
-    are copied back to the same relative path in the caller's working dir.
+    are copied back to the same relative path in the caller's working dir
+    (also when the code fails after saving them). The in-process fallback,
+    used only when no child process can be started, has no filesystem
+    isolation: it runs in the caller's working directory.
     """
     clean_code = strip_markdown_fences(code)
     try:
@@ -312,18 +315,32 @@ def execute_sandboxed(code: str, timeout_seconds: float = DEFAULT_TIMEOUT_SECOND
             return f"{BLOCKED_PREFIX}: execution timed out after {timeout_seconds:g}s"
         except OSError as exc:
             logger.warning(f"Sandbox subprocess unavailable ({exc}); executing in-process with restricted builtins.")
-            return _execute_in_process(clean_code)
+            return _execute_in_process_with_chart_folders(clean_code, chart_targets)
 
+        copy_error = _copy_declared_charts(Path(workdir), chart_targets)
         if completed.returncode != 0:
             detail = (completed.stderr or "").strip().splitlines()[-1:] or ["no details"]
             logger.warning(f"Sandbox child exited with code {completed.returncode}: {detail[0]}")
             return f"Python execution error: sandbox process exited with code {completed.returncode}: {detail[0]}"
-        _copy_declared_charts(Path(workdir), chart_targets)
-        return completed.stdout
+        return copy_error or completed.stdout
 
 
-def _copy_declared_charts(workdir: Path, chart_targets: List[str]) -> None:
-    """Copies each declared chart the child produced back into the current working directory."""
+def _execute_in_process_with_chart_folders(clean_code: str, chart_targets: List[str]) -> str:
+    """Fallback path: creates the declared chart folders in the working directory, then runs in-process."""
+    try:
+        for target in chart_targets:
+            (Path.cwd() / target).parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return f"Python execution error: could not prepare chart folder: {exc}"
+    return _execute_in_process(clean_code)
+
+
+def _copy_declared_charts(workdir: Path, chart_targets: List[str]) -> Optional[str]:
+    """
+    Copies each declared chart the child produced back into the current
+    working directory. Returns an error string instead of raising when a
+    chart cannot be written (e.g. a file blocks the folder path).
+    """
     base = Path.cwd().resolve()
     for target in dict.fromkeys(chart_targets):
         source = workdir / target
@@ -333,8 +350,13 @@ def _copy_declared_charts(workdir: Path, chart_targets: List[str]) -> None:
         if base not in destination.parents:
             logger.error(f"Security: refusing to copy chart outside the working directory: {target}")
             continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+        except OSError as exc:
+            logger.warning(f"Could not save sandbox chart {target!r}: {exc}")
+            return f"Python execution error: could not save chart '{target}': {exc}"
+    return None
 
 
 def _execute_in_process(clean_code: str) -> str:

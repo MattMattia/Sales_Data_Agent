@@ -575,3 +575,31 @@ def test_sandbox_blocks_numpy_memmap_writer(isolated_cwd):
     code = "import numpy as np\nnp.lib.format.open_memmap('x.npy', mode='w+', dtype='float64', shape=(1,))"
 
     assert sandbox.execute_sandboxed(code).startswith("Python execution blocked by security policy")
+
+
+SAVE_NESTED = "import matplotlib.pyplot as plt\nplt.bar(['A'], [1])\nplt.savefig('reports/q3/deals.png')\n"
+
+
+def test_copy_back_failure_returns_an_error_instead_of_raising(isolated_cwd):
+    (isolated_cwd / "reports").write_text("not a folder")
+
+    result = sandbox.execute_sandboxed(SAVE_NESTED + "print('ok')")
+
+    assert result.startswith("Python execution error: could not save chart 'reports/q3/deals.png'")
+
+
+def test_chart_saved_before_a_later_error_is_still_kept(isolated_cwd):
+    result = sandbox.execute_sandboxed(SAVE_NESTED + "1 / 0")
+
+    assert "ZeroDivisionError" in result
+    assert (isolated_cwd / "reports" / "q3" / "deals.png").exists()
+
+
+def test_in_process_fallback_creates_declared_chart_folders(monkeypatch, isolated_cwd):
+    def broken_run(*args, **kwargs):
+        raise OSError("process creation disabled")
+
+    monkeypatch.setattr(sandbox.subprocess, "run", broken_run)
+
+    assert sandbox.execute_sandboxed(SAVE_NESTED + "print('ok')").strip() == "ok"
+    assert (isolated_cwd / "reports" / "q3" / "deals.png").exists()
