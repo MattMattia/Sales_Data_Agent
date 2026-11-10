@@ -106,7 +106,7 @@ The agent executes LLM-generated code and SQL, so every path that touches code, 
 
 | Layer | What it does | What it stops |
 |-------|--------------|---------------|
-| 1. AST policy | Parses the code before running it: import allowlist (`matplotlib`, `seaborn`, `pandas`, `numpy`, ...), forbidden builtins (`eval`, `exec`, `open`, `getattr`, ...), and forbidden attributes (dunders, private members, `os`, `subprocess`, `environ`, and library file readers such as `pd.read_*`, `np.loadtxt`, `plt.imread`). | Imports of OS/process modules, reflection escapes, reading files such as `.env` through allowed libraries. |
+| 1. AST policy | Parses the code before running it: import allowlist (`matplotlib`, `seaborn`, `pandas`, `numpy`, ...), forbidden builtins (`eval`, `exec`, `open`, `getattr`, ...), and forbidden attributes (dunders, private members, `os`, `subprocess`, `environ`, library file readers such as `pd.read_*`, `np.loadtxt`, `plt.imread`, and writers such as `to_csv`, `np.save`). `savefig()` only accepts a literal, relative image path (`.png`, `.jpg`, `.jpeg`, `.svg`) with no `..`. | Imports of OS/process modules, reflection escapes, reading `.env` or overwriting files through allowed libraries. |
 | 2. Restricted builtins | Runs the code with a minimal `__builtins__` and a whitelist-checking `__import__`, on the headless `Agg` backend. | Anything layer 1 could miss at runtime. |
 | 3. Process isolation | Runs validated code in a short-lived child interpreter (`python -I`) with an allowlisted environment (no variable containing `KEY`, `SECRET`, `TOKEN`, `PASSWORD`) and a hard timeout (15 s by default). | Credential theft from process memory or env, infinite loops (`while True: pass`), crashes of the Streamlit process. |
 
@@ -297,12 +297,13 @@ docker compose up --build
 | Service | URL | Purpose |
 |---------|-----|---------|
 | `sales-data-agent` | http://localhost:8501 | Streamlit chat interface |
-| `trulens-dashboard` | http://localhost:8001 | TruLens traces and feedback (starts once the app is healthy) |
+| `trulens-dashboard` | http://localhost:8001 | TruLens traces and feedback (starts once the app is healthy; bound to `127.0.0.1` only) |
 
 How it is wired:
 
 - **Credentials**: an optional `.env` in the project root is injected at runtime (`env_file`, `required: false`). Without it, everything runs in Mock Fallback mode. Secrets are never copied into the image.
-- **Persistence**: both services mount the `trulens-data` volume at `/app/data` and use `TRULENS_DATABASE_URL=sqlite:////app/data/default.sqlite`, so records survive restarts and the dashboard reads what the app writes. Real TruLens records require `OPENAI_API_KEY`; in mock mode the database stays empty.
+- **Persistence**: both services mount the `trulens-data` volume at `/app/data` and use `TRULENS_DATABASE_URL=sqlite:////app/data/default.sqlite`, so records survive restarts and the dashboard reads what the app writes. The scorecard reads only the records of the current run. Real TruLens records require `OPENAI_API_KEY`; in mock mode the database stays empty.
+- **Dashboard exposure**: the dashboard has no authentication and shows every recorded query and answer, so it listens on the host loopback only and receives no credentials. Put it behind an authenticating proxy before exposing it.
 - **Hardening**: the image runs as `appuser` (UID 10001), checks `/_stcore/health`, and the containers drop all Linux capabilities with `no-new-privileges`.
 
 Stop the stack with `docker compose down` (add `-v` only if you want to delete the TruLens data volume).
