@@ -468,3 +468,47 @@ def test_sandbox_allows_savefig_with_literal_fname_keyword(isolated_cwd):
 
     assert sandbox.execute_sandboxed(code).strip() == "ok"
     assert (isolated_cwd / "kw.png").exists()
+
+
+FRAME = "import pandas as pd\ndf = pd.DataFrame({'deal': ['A', 'B'], 'value': [3, 5]})\n"
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "import matplotlib.pyplot as plt\nfig = plt.figure()\nfig.canvas.print_figure('evil.py')",
+        "import matplotlib.pyplot as plt\nfig = plt.figure()\nfig.canvas.print_png('../escape.png')",
+        "import matplotlib\nmatplotlib.backends.backend_pdf.PdfPages('report.pdf')",
+        "import pandas as pd\npd.ExcelWriter('book.xlsx')",
+        FRAME + "df.to_csv('out.csv')",
+        FRAME + "df.to_csv(path_or_buf='out.csv')",
+        FRAME + "df.to_json(path_or_buf='../escape.json')",
+        FRAME + "df.to_html(buf='page.html')",
+        FRAME + "writer = df.to_csv\nwriter('out.csv')",
+    ],
+)
+def test_sandbox_blocks_canvas_backend_and_path_writers(code, isolated_cwd):
+    assert sandbox.execute_sandboxed(code).startswith("Python execution blocked by security policy")
+    assert sorted(p.name for p in isolated_cwd.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "code, expected",
+    [
+        (FRAME + "print(df.to_csv(index=False).strip())", "deal,value"),
+        (FRAME + "print(df.to_json())", '"deal"'),
+        (FRAME + "print(len(df.to_html()) > 0)", "True"),
+    ],
+)
+def test_sandbox_allows_pathless_string_formatting(code, expected, isolated_cwd):
+    output = sandbox.execute_sandboxed(code)
+
+    assert expected in output
+    assert sorted(p.name for p in isolated_cwd.iterdir()) == []
+
+
+def test_sandbox_blocks_to_string_with_a_file_destination(isolated_cwd):
+    result = sandbox.execute_sandboxed(FRAME + "df.to_string('table.txt')")
+
+    assert result.startswith("Python execution blocked by security policy")
+    assert not (isolated_cwd / "table.txt").exists()

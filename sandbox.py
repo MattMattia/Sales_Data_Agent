@@ -62,19 +62,29 @@ FORBIDDEN_ATTRIBUTES = frozenset({
     # (e.g. `pd.read_csv('.env')` would leak secrets from the working directory).
     "io", "load", "loadtxt", "genfromtxt", "fromfile", "fromregex", "memmap",
     "imread", "DataSource",
-    # Library-level file writers (charts may only be written through savefig).
+    # Library-level file writers that always take a destination (charts may
+    # only be written through savefig).
     "save", "savez", "savez_compressed", "savetxt", "tofile", "imsave", "dump",
-    "to_csv", "to_excel", "to_json", "to_parquet", "to_pickle", "to_html",
-    "to_sql", "to_hdf", "to_feather", "to_latex", "to_markdown", "to_stata",
-    "to_xml", "to_orc", "to_clipboard", "to_gbq",
+    "to_excel", "to_parquet", "to_pickle", "to_sql", "to_hdf", "to_feather",
+    "to_stata", "to_orc", "to_clipboard", "to_gbq",
+    "backends", "PdfPages", "ExcelWriter", "HDFStore",
 })
 
-# Any attribute starting with these prefixes is a file/URL reader (pandas `read_*`).
-FORBIDDEN_ATTRIBUTE_PREFIXES = ("read_",)
+# Attribute prefixes for file/URL readers (pandas `read_*`) and matplotlib
+# canvas writers (`print_figure`, `print_png`, ...) that bypass savefig.
+FORBIDDEN_ATTRIBUTE_PREFIXES = ("read_", "print_")
 
 # The only file a chart may write: a literal, relative image path inside the working directory.
 CHART_SAVE_FUNCTIONS = frozenset({"savefig"})
 ALLOWED_CHART_EXTENSIONS = (".png", ".jpg", ".jpeg", ".svg")
+
+# pandas formatters that return a string when called without a destination but
+# write a file when given one: allowed only as direct calls with no path.
+PATH_OPTIONAL_WRITERS = frozenset({
+    "to_csv", "to_json", "to_html", "to_latex", "to_markdown", "to_xml", "to_string",
+})
+_DESTINATION_KEYWORDS = frozenset({"path_or_buf", "path_or_buffer", "buf", "path", "fname", "excel_writer"})
+_GUARDED_CALLABLES = CHART_SAVE_FUNCTIONS | PATH_OPTIONAL_WRITERS
 
 SAFE_BUILTIN_NAMES = (
     "abs", "all", "any", "bool", "dict", "enumerate", "filter", "float",
@@ -113,9 +123,11 @@ class SandboxViolation(Exception):
 
 class _PolicyVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
-        # savefig references that are the callee of a validated call; any other
-        # reference (alias, argument, return value) would bypass the path check.
-        self._checked_save_refs: set = set()
+        # Guarded references (savefig, path-optional writers) that are the callee
+        # of a validated call. ast visits a Call before its `func` child, so the
+        # callee is registered here before visit_Name/visit_Attribute see it; any
+        # other reference (alias, argument, return value) would bypass the check.
+        self._checked_refs: set = set()
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
@@ -128,19 +140,19 @@ class _PolicyVisitor(ast.NodeVisitor):
         _check_module(node.module or "")
         for alias in node.names:
             _check_attribute_name(alias.name)
-            if alias.name in CHART_SAVE_FUNCTIONS and alias.asname not in (None, alias.name):
+            if alias.name in _GUARDED_CALLABLES and alias.asname not in (None, alias.name):
                 raise SandboxViolation(f"renaming '{alias.name}' on import is not allowed")
         self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:
         if node.id in FORBIDDEN_CALLS or node.id.startswith("__"):
             raise SandboxViolation(f"use of '{node.id}' is not allowed")
-        self._check_save_reference(node, node.id)
+        self._check_guarded_reference(node, node.id)
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         _check_attribute_name(node.attr)
-        self._check_save_reference(node, node.attr)
+        self._check_guarded_reference(node, node.attr)
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -148,12 +160,15 @@ class _PolicyVisitor(ast.NodeVisitor):
         name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
         if name in CHART_SAVE_FUNCTIONS:
             _check_chart_save_target(node)
-            self._checked_save_refs.add(id(func))
+            self._checked_refs.add(id(func))
+        elif name in PATH_OPTIONAL_WRITERS:
+            _check_pathless_writer(node, name)
+            self._checked_refs.add(id(func))
         self.generic_visit(node)
 
-    def _check_save_reference(self, node: ast.AST, name: str) -> None:
-        if name in CHART_SAVE_FUNCTIONS and id(node) not in self._checked_save_refs:
-            raise SandboxViolation(f"'{name}' may only be called directly with a literal image path")
+    def _check_guarded_reference(self, node: ast.AST, name: str) -> None:
+        if name in _GUARDED_CALLABLES and id(node) not in self._checked_refs:
+            raise SandboxViolation(f"'{name}' may only be called directly")
 
 
 def _check_module(module_name: str) -> None:
@@ -179,6 +194,15 @@ def _check_chart_save_target(call: ast.Call) -> None:
     parts = path.split("/")
     if path.startswith("/") or ":" in path or ".." in parts or not path.lower().endswith(ALLOWED_CHART_EXTENSIONS):
         raise SandboxViolation(f"savefig() target '{target.value}' must be a relative image path inside the working directory")
+
+
+def _check_pathless_writer(call: ast.Call, name: str) -> None:
+    """to_csv()/to_json()/... may only return a string: no positional or destination argument."""
+    has_destination = bool(call.args) or any(
+        kw.arg is None or kw.arg in _DESTINATION_KEYWORDS for kw in call.keywords
+    )
+    if has_destination:
+        raise SandboxViolation(f"{name}() may only be used without a file destination (writing files is not allowed)")
 
 
 def validate_code_ast(code: str) -> None:
