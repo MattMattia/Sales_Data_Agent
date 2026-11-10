@@ -11,29 +11,9 @@ Includes:
 """
 
 import json
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Union
 
-try:
-    from langchain_core.messages import HumanMessage, SystemMessage
-except ImportError:
-    try:
-        from langchain.schema import HumanMessage, SystemMessage
-    except ImportError:
-        class HumanMessage:
-            def __init__(self, content: str, name: Optional[str] = None):
-                self.content = content
-                self.name = name
-                self.type = "human"
-            def __repr__(self):
-                return f"HumanMessage(content={self.content!r}, name={self.name!r})"
-
-        class SystemMessage:
-            def __init__(self, content: str, name: Optional[str] = None):
-                self.content = content
-                self.name = name
-                self.type = "system"
-            def __repr__(self):
-                return f"SystemMessage(content={self.content!r}, name={self.name!r})"
+from state import DEFAULT_ENABLED_AGENTS, HumanMessage, SystemMessage
 
 
 # =====================================================================
@@ -49,7 +29,7 @@ Do NOT attempt to take further actions."""
 
 CHART_GENERATOR_SYSTEM_PROMPT = """You can only generate charts. You are working with a researcher colleague.
 1) Print the chart first.
-2) Save the chart to a file in the current working directory.
+2) Save the chart as a .png file using a relative path inside the current working directory (for example charts/top_deals.png). Never use absolute paths or '..'.
 3) At the very end of your message, output EXACTLY two lines so the summarizer can find them:
    CHART_PATH: <relative_path_to_chart_file>
    CHART_NOTES: <one concise sentence summarizing the main insight in the chart>
@@ -79,14 +59,6 @@ def agent_system_prompt(instructions: str) -> SystemMessage:
 # =====================================================================
 # Planner Prompt (With L6 Enhancements: GPA Alignment, Goals, Pre/Post Conditions)
 # =====================================================================
-
-DEFAULT_ENABLED_AGENTS = [
-    "cortex_researcher",
-    "web_researcher",
-    "chart_generator",
-    "chart_summarizer",
-    "synthesizer",
-]
 
 PLANNER_INSTRUCTIONS = """You are an expert multi-agent task planner.
 Your goal is to break down the user's query into a sequential, logical, and executable multi-step plan.

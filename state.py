@@ -8,9 +8,88 @@ the `add_messages` reducer, enriched with attributes required for:
 2. Step-by-step dispatch and task instructions between planner_node and executor_node.
 3. Bounded replanning attempt accounting per step (replan_attempts).
 4. Persisting the final synthesized response or chart summary (final_answer).
+
+It is also the single source of truth for cross-module primitives:
+- load_environment(): idempotent `.env` loading (imported first by every module).
+- HumanMessage / AIMessage / SystemMessage (with dependency-free fallbacks).
+- DEFAULT_ENABLED_AGENTS and WORKER_AGENTS.
 """
 
+import os
 from typing import Any, Dict, List, Optional
+
+# =====================================================================
+# Environment Configuration (.env loading)
+# =====================================================================
+
+SKIP_DOTENV_ENV_VAR = "SALES_AGENT_SKIP_DOTENV"
+
+
+def load_environment(dotenv_path: Optional[str] = None) -> bool:
+    """
+    Loads variables from a `.env` file into os.environ without overriding
+    variables already exported in the shell (override=False).
+
+    Set SALES_AGENT_SKIP_DOTENV=1 to disable loading (used by the test suite).
+    Returns True when a `.env` file was found and loaded.
+    """
+    if os.getenv(SKIP_DOTENV_ENV_VAR) == "1":
+        return False
+    try:
+        from dotenv import find_dotenv, load_dotenv
+    except ImportError:
+        return False
+    path = dotenv_path or find_dotenv(usecwd=True)
+    if not path:
+        return False
+    return bool(load_dotenv(path, override=False))
+
+
+# Load `.env` before any tool or model reads its configuration.
+load_environment()
+
+
+# =====================================================================
+# Message Classes (LangChain with dependency-free fallbacks)
+# =====================================================================
+
+try:
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+except ImportError:
+    class _FallbackMessage:
+        type = "base"
+
+        def __init__(self, content: str, name: Optional[str] = None):
+            self.content = content
+            self.name = name
+
+        def __repr__(self):
+            return f"{type(self).__name__}(content={self.content!r}, name={self.name!r})"
+
+    class HumanMessage(_FallbackMessage):
+        type = "human"
+
+    class AIMessage(_FallbackMessage):
+        type = "ai"
+
+    class SystemMessage(_FallbackMessage):
+        type = "system"
+
+
+# =====================================================================
+# Agent Registry
+# =====================================================================
+
+DEFAULT_ENABLED_AGENTS: List[str] = [
+    "cortex_researcher",
+    "web_researcher",
+    "chart_generator",
+    "chart_summarizer",
+    "synthesizer",
+]
+
+# Worker nodes a plan step or an executor decision may target.
+WORKER_AGENTS = frozenset(DEFAULT_ENABLED_AGENTS)
 
 try:
     from pydantic import BaseModel, Field
@@ -73,7 +152,7 @@ class ExecutorDecision(BaseModel):
     )
     goto: str = Field(
         ...,
-        description="Name of the next node to execute ('cortex_researcher', 'web_researcher', 'chart_generator', 'synthesizer', 'planner')"
+        description="Name of the next node to execute ('cortex_researcher', 'web_researcher', 'chart_generator', 'chart_summarizer', 'synthesizer', 'planner')"
     )
     reason: str = Field(
         ...,
@@ -122,6 +201,10 @@ class State(MessagesState):
     final_answer:
         Final synthesized response string (prose report or chart caption) produced by
         'synthesizer' or 'chart_summarizer' before transitioning to END.
+    chart_path:
+        Validated relative path of the chart image produced by 'chart_generator' (or None).
+    chart_notes:
+        One-sentence insight emitted by 'chart_generator' alongside CHART_PATH (or None).
     """
     user_query: Optional[str]
     enabled_agents: Optional[List[str]]
@@ -132,3 +215,5 @@ class State(MessagesState):
     replan_flag: Optional[bool]
     replan_attempts: Optional[Dict[int, int]]
     final_answer: Optional[str]
+    chart_path: Optional[str]
+    chart_notes: Optional[str]
