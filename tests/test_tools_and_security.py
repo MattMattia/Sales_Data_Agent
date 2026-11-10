@@ -246,15 +246,15 @@ def test_sandbox_renders_matplotlib_chart_with_agg_backend(isolated_cwd):
         "plt.bar(['A', 'B'], [1, 2])\n"
         "plt.savefig('chart.png')\n"
         "plt.close()\n"
-        "print('saved')"
+        "import matplotlib\n"
+        "print('saved', matplotlib.get_backend())"
     )
 
     output = PythonREPLTool().run(code)
 
-    import matplotlib
-    assert output.strip() == "saved"
+    # Rendering happens in the isolated child, which must use the headless backend.
+    assert output.strip().lower() == "saved agg"
     assert (isolated_cwd / "chart.png").exists()
-    assert matplotlib.get_backend().lower() == "agg"
 
 
 @pytest.mark.parametrize(
@@ -295,3 +295,61 @@ def test_sandbox_reports_syntax_errors():
 
     assert output.startswith("Python execution blocked by security policy")
     assert "SyntaxError" in output
+
+
+# ---------------------------------------------------------------------
+# Sandbox process isolation (second defense layer)
+# ---------------------------------------------------------------------
+
+import subprocess  # noqa: E402
+
+import sandbox  # noqa: E402
+
+
+def test_sandbox_kills_infinite_loop_after_timeout():
+    result = sandbox.execute_sandboxed("while True:\n    pass", timeout_seconds=0.5)
+
+    assert result == "Python execution blocked by security policy: execution timed out after 0.5s"
+
+
+def test_sandbox_child_process_never_receives_secrets(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret-test")
+    monkeypatch.setenv("SNOWFLAKE_PASSWORD", "hunter2")
+    monkeypatch.setenv("CUSTOM_SERVICE_TOKEN", "tok-123")
+    captured = {}
+    real_run = subprocess.run
+
+    def spy_run(*args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(sandbox.subprocess, "run", spy_run)
+
+    result = sandbox.execute_sandboxed("print(6 * 7)")
+
+    assert result.strip() == "42"
+    child_env = captured["env"]
+    assert child_env is not None
+    assert "sk-secret-test" not in child_env.values()
+    assert not {"OPENAI_API_KEY", "SNOWFLAKE_PASSWORD", "CUSTOM_SERVICE_TOKEN"} & set(child_env)
+    assert child_env["MPLBACKEND"] == "Agg"
+
+
+def test_sandbox_rejects_policy_violations_before_spawning(monkeypatch):
+    def fail_run(*args, **kwargs):
+        raise AssertionError("subprocess must not start for rejected code")
+
+    monkeypatch.setattr(sandbox.subprocess, "run", fail_run)
+
+    result = sandbox.execute_sandboxed("import os")
+
+    assert result.startswith("Python execution blocked by security policy")
+
+
+def test_sandbox_falls_back_in_process_when_subprocess_unavailable(monkeypatch):
+    def broken_run(*args, **kwargs):
+        raise OSError("process creation disabled")
+
+    monkeypatch.setattr(sandbox.subprocess, "run", broken_run)
+
+    assert sandbox.execute_sandboxed("print(sum([1, 2, 3]))").strip() == "6"

@@ -1,22 +1,33 @@
 """
 sandbox.py - Restricted execution environment for LLM-generated chart code.
 
-Defense-in-depth layers applied before and during `exec()`:
+Defense-in-depth layers:
 1. Static AST validation: import whitelist, forbidden builtins, forbidden
    attribute names (dunders, private members, OS/process escape hatches).
-2. Restricted `__builtins__` with a whitelist-checking `__import__`.
-3. Headless matplotlib backend ("Agg") so rendering never touches a GUI thread.
+2. Restricted `__builtins__` with a whitelist-checking `__import__`, plus a
+   headless matplotlib backend ("Agg") so rendering never touches a GUI thread.
+3. Process isolation: validated code runs in a short-lived child interpreter
+   with an allowlisted environment (no API keys, passwords or tokens) and a
+   hard timeout, so infinite loops or crashes never reach the Streamlit
+   process or the memory that holds its credentials.
 
-IMPORTANT: an in-process Python sandbox reduces risk but is not a hard
-security boundary. For untrusted, internet-facing deployments, run the chart
-generator inside an isolated container/process with no secrets in its env.
+The child process is not a container: it still shares the filesystem and
+network of the host. Run the app itself in the provided Docker image for
+internet-facing deployments.
 """
 
 import ast
 import builtins
 import io
+import logging
+import os
+import re
+import subprocess
+import sys
 from contextlib import redirect_stderr, redirect_stdout
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
+
+logger = logging.getLogger("sales_data_agent.sandbox")
 
 ALLOWED_MODULES = frozenset({
     "matplotlib",
@@ -59,6 +70,25 @@ SAFE_BUILTIN_NAMES = (
 )
 
 BLOCKED_PREFIX = "Python execution blocked by security policy"
+
+DEFAULT_TIMEOUT_SECONDS = 15.0
+
+# Only these variables reach the child interpreter (allowlist, not denylist).
+CHILD_ENV_ALLOWLIST = frozenset({
+    "PATH", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "TEMP", "TMP", "TMPDIR",
+    "HOME", "USERPROFILE", "LANG", "LC_ALL",
+})
+_SECRET_NAME_RE = re.compile(r"KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL", re.IGNORECASE)
+_SANDBOX_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Executed by the child with `python -I -c`: the code arrives on stdin and the
+# child re-applies layer 2 (restricted builtins + Agg backend) before exec().
+_CHILD_RUNNER = (
+    "import sys\n"
+    f"sys.path.insert(0, {_SANDBOX_DIR!r})\n"
+    "import sandbox\n"
+    "sys.stdout.write(sandbox._execute_in_process(sys.stdin.read()))\n"
+)
 
 
 class SandboxViolation(Exception):
@@ -142,7 +172,22 @@ def strip_markdown_fences(code: str) -> str:
     return clean.strip()
 
 
-def execute_sandboxed(code: str) -> str:
+def build_child_env(source: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
+    """
+    Returns the minimal environment for the sandbox child: allowlisted system
+    variables only, never anything whose name looks like a credential.
+    """
+    source = os.environ if source is None else source
+    env = {
+        name: value for name, value in source.items()
+        if name.upper() in CHILD_ENV_ALLOWLIST and not _SECRET_NAME_RE.search(name)
+    }
+    env["MPLBACKEND"] = "Agg"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
+def execute_sandboxed(code: str, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> str:
     """
     Validates and executes chart/analysis code, returning captured stdout or
     a descriptive error string. Never raises for user code problems.
@@ -153,6 +198,32 @@ def execute_sandboxed(code: str) -> str:
     except SandboxViolation as violation:
         return f"{BLOCKED_PREFIX}: {violation}"
 
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-I", "-c", _CHILD_RUNNER],
+            input=clean_code,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=build_child_env(),
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return f"{BLOCKED_PREFIX}: execution timed out after {timeout_seconds:g}s"
+    except OSError as exc:
+        logger.warning(f"Sandbox subprocess unavailable ({exc}); executing in-process with restricted builtins.")
+        return _execute_in_process(clean_code)
+
+    if completed.returncode != 0:
+        detail = (completed.stderr or "").strip().splitlines()[-1:] or ["no details"]
+        return f"Python execution error: sandbox process exited with code {completed.returncode}: {detail[0]}"
+    return completed.stdout
+
+
+def _execute_in_process(clean_code: str) -> str:
+    """Layer 2: exec() already-validated code with restricted builtins."""
     _use_headless_backend()
     namespace: Dict[str, Any] = {"__name__": "__sandbox__", "__builtins__": _restricted_builtins()}
     stdout_buffer, stderr_buffer = io.StringIO(), io.StringIO()
