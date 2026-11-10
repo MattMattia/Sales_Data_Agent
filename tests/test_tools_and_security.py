@@ -448,3 +448,23 @@ def test_sandbox_allows_direct_savefig_imported_by_name(isolated_cwd):
 
     assert sandbox.execute_sandboxed(code).strip() == "ok"
     assert (isolated_cwd / "chart.png").exists()
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "import matplotlib.pyplot as plt\nplt.savefig(r'..\\escape.png')",
+        "import matplotlib.pyplot as plt\nplt.savefig(r'charts\\..\\..\\escape.png')",
+        "import matplotlib.pyplot as plt\nplt.savefig(r'\\\\server\\share\\evil.png')",
+        "import matplotlib.pyplot as plt\nplt.savefig('C:evil.png')",
+    ],
+)
+def test_sandbox_blocks_backslash_and_unc_savefig_targets(code, isolated_cwd):
+    assert sandbox.execute_sandboxed(code).startswith("Python execution blocked by security policy")
+
+
+def test_sandbox_allows_savefig_with_literal_fname_keyword(isolated_cwd):
+    code = "import matplotlib.pyplot as plt\nplt.bar(['A'], [1])\nplt.savefig(fname='kw.png')\nprint('ok')"
+
+    assert sandbox.execute_sandboxed(code).strip() == "ok"
+    assert (isolated_cwd / "kw.png").exists()
