@@ -8,9 +8,11 @@ evals.py - TruLens Evaluation and Observability System:
 """
 
 import os
-import sys
+import math
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from state import load_environment  # noqa: F401 - importing state loads `.env` first
 
 logger = logging.getLogger("sales_data_agent.evals")
 
@@ -386,7 +388,77 @@ def setup_trulens_recorder(
 
 
 # =====================================================================
-# 4. Main Test Block (__main__)
+# 4. Evaluation Results (Mock and Production modes)
+# =====================================================================
+
+PENDING_REASON = "Pending: feedback not yet computed by TruLens."
+
+
+def _feedback_name(feedback: Any) -> str:
+    return str(getattr(feedback, "name", type(feedback).__name__))
+
+
+def _fetch_recorded_feedback(recording: Any = None) -> Dict[str, float]:
+    """
+    Reads the latest feedback scores persisted by TruGraph. Returns a
+    {metric_name: score} mapping (empty when nothing has been computed yet).
+    """
+    session = getattr(recording, "session", None) or TruSession()
+    records_df, feedback_names = session.get_records_and_feedback()
+    if records_df is None or len(records_df) == 0:
+        return {}
+    latest = records_df.iloc[-1]
+    scores: Dict[str, float] = {}
+    for name in feedback_names or []:
+        value = latest.get(name)
+        if isinstance(value, (int, float)) and not math.isnan(value):
+            scores[str(name)] = float(value)
+    return scores
+
+
+def evaluate_query_results(final_state: Dict[str, Any], recording: Any = None) -> List[Dict[str, Any]]:
+    """
+    Returns one {"metric", "score", "reason"} row per feedback in ALL_FEEDBACKS.
+
+    - Mock mode: invokes each MockFeedback on the final answer.
+    - TruLens mode: real Feedback objects need span selectors (2+ arguments or
+      the full trace), so they are NEVER called directly here. Scores are read
+      from the records TruGraph persisted; missing ones are reported as pending.
+    Never raises: failures are reported in the "reason" field.
+    """
+    final_answer = str(final_state.get("final_answer") or "")
+
+    if not TRULENS_INSTALLED:
+        rows = []
+        for fb in ALL_FEEDBACKS:
+            score, details = fb(final_answer)
+            reason = details.get("reason", "") if isinstance(details, dict) else str(details)
+            rows.append({"metric": _feedback_name(fb), "score": float(score), "reason": reason})
+        return rows
+
+    try:
+        recorded = _fetch_recorded_feedback(recording)
+        error_reason = None
+    except Exception as exc:
+        logger.warning(f"Could not read TruLens feedback results: {exc}")
+        recorded, error_reason = {}, f"Unavailable: {type(exc).__name__}: {exc}"
+
+    rows = []
+    for fb in ALL_FEEDBACKS:
+        name = _feedback_name(fb)
+        if name in recorded:
+            rows.append({"metric": name, "score": recorded[name], "reason": "Computed by TruLens."})
+        else:
+            rows.append({"metric": name, "score": None, "reason": error_reason or PENDING_REASON})
+    return rows
+
+
+# Backward-compatible alias used in the audit remediation plan
+evaluate_and_report = evaluate_query_results
+
+
+# =====================================================================
+# 5. Main Test Block (__main__)
 # =====================================================================
 
 if __name__ == "__main__":
@@ -423,11 +495,10 @@ if __name__ == "__main__":
     print(f"{'METRIC':<24} | {'SCORE':<7} | {'CHAIN-OF-THOUGHT (CoT) REASONING'}")
     print("-" * 75)
 
-    # Simulate or compute evaluations on the response
-    for fb in ALL_FEEDBACKS:
-        score, reason_dict = fb(final_answer)
-        reason = reason_dict.get("reason", "") if isinstance(reason_dict, dict) else str(reason_dict)
-        print(f"{fb.name:<24} | {score:0.2f}    | {reason}")
+    # Simulate (mock) or read (TruLens) evaluations without calling real Feedback objects directly
+    for row in evaluate_query_results(final_state, recording=recording):
+        score = "n/a " if row["score"] is None else f"{row['score']:0.2f}"
+        print(f"{row['metric']:<24} | {score}    | {row['reason']}")
 
     print("=" * 75 + "\n")
 
