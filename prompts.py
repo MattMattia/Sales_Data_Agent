@@ -29,7 +29,7 @@ Do NOT attempt to take further actions."""
 
 CHART_GENERATOR_SYSTEM_PROMPT = """You can only generate charts. You are working with a researcher colleague.
 1) Print the chart first.
-2) Save the chart as a .png file using a relative path inside the current working directory (for example charts/top_deals.png). Never use absolute paths or '..'.
+2) Save the chart with plt.savefig("<name>.png"), passing the file name as a literal string (no variables), relative to the current working directory (for example plt.savefig("top_deals_chart.png")). Never use absolute paths or '..'. Do not write any other file.
 3) At the very end of your message, output EXACTLY two lines so the summarizer can find them:
    CHART_PATH: <relative_path_to_chart_file>
    CHART_NOTES: <one concise sentence summarizing the main insight in the chart>
@@ -130,7 +130,12 @@ def plan_prompt(state: Union[Dict[str, Any], Any]) -> HumanMessage:
                 history_snippets.append(f"- [{name}]: {snippet}")
             prompt_lines.append("Recent Agent Findings / Errors:\n" + "\n".join(history_snippets))
 
-        prompt_lines.append("\nProduce an updated plan starting from the current situation to successfully fulfill the user query.")
+        prompt_lines.append(
+            "\nProduce an updated plan starting from the current situation to successfully fulfill the user query. "
+            "Include ONLY the steps that still need to run and number them starting from \"1\" "
+            "(execution restarts at step 1 of the new plan). "
+            "Do not repeat steps that already succeeded; their findings are in the conversation."
+        )
     else:
         prompt_lines.append("\nCreate an optimal initial plan to fulfill the user's query end-to-end.")
 

@@ -188,3 +188,16 @@ def test_env_template_enforces_least_privilege_and_required_keys():
     assert all("ACCOUNTADMIN" not in line.upper() for line in active_roles)
     missing = [key for key in REQUIRED_TEMPLATE_KEYS if key not in text]
     assert missing == []
+
+
+def test_replan_prompt_requires_only_remaining_steps_numbered_from_one():
+    content = prompts.plan_prompt({
+        "messages": [HumanMessage(content="Top deals?")],
+        "replan_flag": True,
+        "current_step": 2,
+        "plan": {"1": {"agent": "cortex_researcher", "action": "Fetch"}},
+    }).content
+
+    assert "Include ONLY the steps that still need to run" in content
+    assert "number them starting from \"1\"" in content
+    assert "Do not repeat steps that already succeeded" in content
