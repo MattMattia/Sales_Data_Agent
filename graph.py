@@ -133,7 +133,7 @@ def build_graph() -> Any:
     - Specialists:
         * cortex_researcher (Cortex Analyst / Search) -> executor
         * web_researcher (Tavily Search)              -> executor
-        * chart_generator (Python REPL Tool)          -> chart_summarizer
+        * chart_generator (Python REPL Tool)          -> chart_summarizer (synthesizer if disabled)
         * chart_summarizer                            -> END
         * synthesizer                                 -> END
     """

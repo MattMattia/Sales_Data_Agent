@@ -554,6 +554,10 @@ def planner_node(state: State) -> Command[Literal["executor"]]:
 
 
 MAX_REPLANS = 3
+# Revised plans are renumbered from 1, so per-step counters alone cannot bound
+# a run: this caps replans across the whole run (well below LangGraph's
+# default recursion limit of 25 supersteps).
+MAX_TOTAL_REPLANS = 5
 
 def executor_node(
     state: State,
@@ -616,7 +620,8 @@ def executor_node(
 
     # 2) Replan decision
     if decision.replan or goto == "planner":
-        if step_replans < MAX_REPLANS:
+        total_replans = sum(replans.values())
+        if step_replans < MAX_REPLANS and total_replans < MAX_TOTAL_REPLANS:
             replans[step] = step_replans + 1
             updates.update({
                 "replan_attempts": replans,
@@ -679,11 +684,12 @@ def web_research_node(
     )
 
 
-def chart_node(state: State) -> Command[Literal["chart_summarizer"]]:
+def chart_node(state: State) -> Command[Literal["chart_summarizer", "synthesizer"]]:
     """
     Sub-agent for generating plotting code and rendering charts to disk via the
     sandboxed Python tool. Receives a focused instruction plus the collected
     research data, and stores the validated CHART_PATH / CHART_NOTES in state.
+    Hands off to chart_summarizer, or to the synthesizer when the user disabled it.
     """
     instruction = state.get("agent_query") or state.get("user_query", "")
     findings = "\n\n---\n\n".join(_research_findings(state)) or "No research data collected."
@@ -705,7 +711,7 @@ def chart_node(state: State) -> Command[Literal["chart_summarizer"]]:
             "chart_path": chart_path,
             "chart_notes": notes_match.group(1) if notes_match else None,
         },
-        goto="chart_summarizer",
+        goto=_routable_agent("chart_summarizer", _allowed_agents(state)),
     )
 
 

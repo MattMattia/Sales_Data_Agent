@@ -404,3 +404,49 @@ def test_evaluate_query_results_never_raises_with_real_feedback_objects(monkeypa
     results = evals.evaluate_query_results({"final_answer": "x"}, recording=None)
 
     assert results == [{"metric": "Groundedness", "score": None, "reason": "Pending: feedback not yet computed by TruLens."}]
+
+
+# ---------------------------------------------------------------------
+# Reliability follow-ups: replan budget, disabled chart_summarizer
+# ---------------------------------------------------------------------
+
+def test_executor_stops_replanning_when_total_budget_is_spent(monkeypatch):
+    decision = {"replan": True, "goto": "planner", "reason": "still failing", "query": ""}
+    monkeypatch.setattr(nodes, "reasoning_llm", FakeLLM(json.dumps(decision)))
+    spent = {1: 2, 2: 2, 3: 2}  # renumbered plans spread replans over many indices
+    assert sum(spent.values()) >= nodes.MAX_TOTAL_REPLANS
+
+    command = executor_node(dict(REPLANNED_STATE, replan_flag=False, replan_attempts=spent))
+
+    assert command.goto != "planner"
+    assert command.update["current_step"] == 2
+
+
+def test_executor_still_replans_within_total_budget(monkeypatch):
+    decision = {"replan": True, "goto": "planner", "reason": "no data", "query": ""}
+    monkeypatch.setattr(nodes, "reasoning_llm", FakeLLM(json.dumps(decision)))
+
+    command = executor_node(dict(REPLANNED_STATE, replan_flag=False, replan_attempts={2: 1}))
+
+    assert command.goto == "planner"
+
+
+def test_chart_node_routes_to_synthesizer_when_summarizer_disabled(isolated_cwd, monkeypatch):
+    monkeypatch.setattr(nodes, "chart_agent", RecordingAgent("CHART_PATH: deals.png\nCHART_NOTES: n"))
+    enabled = ["cortex_researcher", "chart_generator"]
+
+    command = chart_node({"agent_query": "Plot", "messages": [], "enabled_agents": enabled})
+
+    assert command.goto == "synthesizer"
+
+
+def test_run_agent_never_runs_disabled_chart_summarizer(isolated_cwd):
+    final_state = run_agent(
+        "What are our top 3 customer deals? Chart the deal value for each.",
+        enabled_agents=["cortex_researcher", "chart_generator"],
+        verbose=False,
+    )
+
+    names = [getattr(m, "name", None) for m in final_state["messages"]]
+    assert "chart_summarizer" not in names
+    assert final_state["final_answer"]
