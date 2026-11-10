@@ -36,7 +36,7 @@ flowchart TD
 
 2. **Executor Node (`executor_node`)**:
    - Evaluates step-by-step progress and evidence collected across messages.
-   - Enforces execution safeguards with bounded replan accounting (`MAX_REPLANS = 3` per step) to eliminate infinite loops.
+   - Enforces execution safeguards with bounded replan accounting (`MAX_REPLANS = 3` per step and `MAX_TOTAL_REPLANS = 5` per run) to eliminate infinite loops.
    - Dispatches dynamically to specialized worker agents using LangGraph's `Command(goto=..., update=...)`.
 
 3. **Heterogeneous Data Retrieval**:
@@ -72,6 +72,7 @@ Sales_Data_Agent/
 ├── .github/workflows/
 │   └── ci.yml             # CI: quality & secret scan, pytest, mock end-to-end smoke test
 ├── app.py                 # Interactive Streamlit web interface with chat and chart rendering
+├── artifacts.py           # Chart artifacts for the UI (only images written during the current run)
 ├── state.py               # State schema, Pydantic models, `.env` loading, shared messages & agent registry
 ├── prompts.py             # System prompts, GPA plan prompts, and executor decision prompts
 ├── tools.py               # CortexAgentTool (read-only SQL guardrail), Tavily, sandboxed Python tool
@@ -271,8 +272,8 @@ Features included in the web interface:
 - **Conversational Chat**: Preserves multi-turn conversation history using `st.session_state` and `st.chat_message`.
 - **Live Status & Feedback**: Displays `st.spinner("Agents researching and analyzing...")` while orchestrating nodes.
 - **Agent Selection**: Sidebar `Enabled agents` multiselect passed to `run_agent(enabled_agents=...)`.
-- **TruLens Scorecard**: `Run TruLens Evaluation Scorecard` checkbox shows the 7 metrics (RAG Triad + GPA) per answer.
-- **Dynamic Chart Rendering**: Displays the chart reported in the graph state (`chart_path`) and stores its bytes in the chat history, so earlier charts are never overwritten.
+- **TruLens Scorecard**: `Run TruLens Evaluation Scorecard` checkbox shows the 7 metrics (RAG Triad + GPA) per answer, recorded by a TruLens recorder dedicated to each browser session.
+- **Dynamic Chart Rendering**: Displays the chart reported in the graph state (`chart_path`) only if it was written during the current run, and stores its bytes in the chat history, so earlier charts are never overwritten.
 - **Plan Inspection**: Collapsible JSON tree viewer for inspecting the generated multi-agent execution plan.
 - **Sidebar Diagnostics**: Real-time connection indicators for OpenAI, Tavily, and Snowflake Cortex.
 
@@ -324,7 +325,8 @@ The suite forces Mock Fallback mode (no network, no `.env`), so it is determinis
 |-------------|-------------------|
 | `test_state_and_prompts.py` | Pydantic schemas, `.env` loading, prompts, and the `.env.template` least-privilege contract. |
 | `test_tools_and_security.py` | Mock integrations, the read-only SQL guardrail, and all three sandbox layers (policy, timeout, secret-free child). |
-| `test_nodes_and_graph.py` | Planner/executor routing, replanning limits, chart flows, and end-to-end graph runs. |
+| `test_nodes_and_graph.py` | Planner/executor routing, per-step and per-run replanning limits, chart flows (including a disabled `chart_summarizer`), and end-to-end graph runs. |
+| `test_artifacts.py` | Chart freshness: images left by earlier runs are never attached to a new answer. |
 | `test_production_contracts.py` | Production code paths without network: Cortex SSE parsing and fallback, `ChatOpenAI` construction, TruLens feedback reading, `RETRIEVAL` span attributes, database URL resolution. |
 | `test_streamlit_app.py` | The real UI via Streamlit `AppTest`: initial load, chat answers with plan and 7-metric scorecard, chart persistence, clearing history, no deprecation warnings. |
 | `test_container_config.py` | Docker invariants: non-root user, health check, `Agg` backend, no `.env` in the image, shared TruLens volume. |
