@@ -65,25 +65,28 @@ Sales_Data_Agent/
 ├── .env.template          # Environment variables template with configuration guidance
 ├── requirements.txt       # Production dependencies with pinned versions
 ├── README.md              # Project documentation, architecture, and setup instructions
+├── pytest.ini             # Test runner configuration
 ├── app.py                 # Interactive Streamlit web interface with chat and chart rendering
-├── state.py               # Strongly-typed State schema (MessagesState) & Pydantic models
+├── state.py               # State schema, Pydantic models, `.env` loading, shared messages & agent registry
 ├── prompts.py             # System prompts, GPA plan prompts, and executor decision prompts
-├── tools.py               # CortexAgentTool, TavilySearch, and PythonREPLTool (with mock fallback)
+├── tools.py               # CortexAgentTool (read-only SQL guardrail), Tavily, sandboxed Python tool
+├── sandbox.py             # AST-validated, restricted-builtins execution of chart code
 ├── nodes.py               # Orchestrator nodes (planner, executor) & specialized ReAct workers
 ├── graph.py               # StateGraph construction, build_graph(), run_agent() & topology
 ├── evals.py               # TruLens RAG Triad + GPA Alignment evaluation suite & recorder
-└── top_deals_chart.png    # Sample chart artifact produced by the multi-agent pipeline
+└── tests/                 # pytest suite (state/prompts, tools/security, nodes/graph/evals)
 ```
 
 ### Module Breakdown
 
-- **[`app.py`](app.py)**: Streamlit web application providing a conversational UI (`st.chat_message`, `st.chat_input`), real-time execution status (`st.spinner`), expandable multi-agent execution plans, and dynamic chart artifact rendering (`top_deals_chart.png`).
-- **[`state.py`](state.py)**: Extends LangGraph's `MessagesState` with typed attributes: `user_query`, `enabled_agents`, `plan`, `current_step`, `agent_query`, `last_reason`, `replan_flag`, `replan_attempts`, and `final_answer`. Includes `PlanStep` and `ExecutorDecision` Pydantic models for structured output validation.
+- **[`app.py`](app.py)**: Streamlit web application providing a conversational UI (`st.chat_message`, `st.chat_input`), real-time execution status (`st.spinner`), an enabled-agents selector, an optional TruLens scorecard per answer, expandable execution plans, and chart rendering stored as bytes per message.
+- **[`state.py`](state.py)**: Extends LangGraph's `MessagesState` with typed attributes: `user_query`, `enabled_agents`, `plan`, `current_step`, `agent_query`, `last_reason`, `replan_flag`, `replan_attempts`, `final_answer`, `chart_path`, and `chart_notes`. Includes `PlanStep` and `ExecutorDecision` Pydantic models (enforced by the planner and executor), `load_environment()`, the shared message classes, and `DEFAULT_ENABLED_AGENTS`.
 - **[`prompts.py`](prompts.py)**: Centralizes all prompt engineering. Features `plan_prompt` (incorporating L6 GPA sub-goals and replanning notices), `executor_prompt` (JSON router schema), and system prompts for all ReAct agents and the synthesizer.
 - **[`tools.py`](tools.py)**: Encapsulates external integrations:
-  - `CortexAgentTool`: Snowflake Snowpark and Cortex Lite Agent Service runner. Includes an automatic high-fidelity mock fallback when credentials are not configured.
+  - `CortexAgentTool`: Snowflake Snowpark and Cortex Lite Agent Service runner. Creates the Snowpark session from `SNOWFLAKE_*` variables, uses `SNOWFLAKE_WAREHOUSE`, and only executes single read-only `SELECT`/`WITH` statements. Includes an automatic high-fidelity mock fallback when credentials are not configured.
   - `tavily_tool` / `get_tavily_tool`: Web search with `MockTavilySearch` fallback.
-  - `python_repl_tool` / `PythonREPLTool`: In-memory Python shell for plotting charts.
+  - `python_repl_tool` / `PythonREPLTool`: Sandboxed Python shell for plotting charts (import whitelist, blocked builtins/dunders, headless `Agg` backend). An in-process sandbox is defense-in-depth, not an isolation boundary: run the chart agent in an isolated container for untrusted deployments.
+  - `query_cortex_agent`, `search_web`, `run_python_code`: `(str) -> str` wrappers given to the ReAct agents; retrieval wrappers emit TruLens `RETRIEVAL` spans.
 - **[`nodes.py`](nodes.py)**: Implements all graph nodes. Encapsulates `planner_node`, `executor_node`, `cortex_agents_research_node`, `web_research_node`, `chart_node`, `chart_summary_node`, and `synthesizer_node`.
 - **[`graph.py`](graph.py)**: Assembles and compiles the `StateGraph(State)`. Exposes `build_graph()`, `run_agent()`, and graph topology visualization functions (`get_graph_mermaid()`, `display_ascii_graph()`).
 - **[`evals.py`](evals.py)**: Configures the 7 evaluation metrics across the RAG Triad and GPA dimensions. Implements `setup_trulens_recorder()` with SQLite persistence and the `@inline_evaluation` decorator.
@@ -136,7 +139,10 @@ copy .env.template .env
 cp .env.template .env
 ```
 
-Edit `.env` to supply your credentials:
+Edit `.env` to supply your credentials. Every module loads `.env` automatically at import time (variables already exported in your shell take precedence). Set `SALES_AGENT_SKIP_DOTENV=1` to disable loading.
+
+> **Security:** connect Snowflake with a least-privilege, read-only role (for example `SALES_ANALYST_RO`). Never use `ACCOUNTADMIN` for an AI agent.
+
 
 ```ini
 # ==============================================================================
@@ -157,7 +163,7 @@ TAVILY_API_KEY=tvly-your-tavily-key-here
 SNOWFLAKE_ACCOUNT=your-account-identifier
 SNOWFLAKE_USER=your-username
 SNOWFLAKE_PASSWORD=your-password
-SNOWFLAKE_ROLE=ACCOUNTADMIN
+SNOWFLAKE_ROLE=SALES_ANALYST_RO
 SNOWFLAKE_WAREHOUSE=SALES_INTELLIGENCE_WH
 SNOWFLAKE_DATABASE=SALES_INTELLIGENCE
 SNOWFLAKE_SCHEMA=DATA
@@ -182,7 +188,7 @@ python graph.py
 This runs two representative end-to-end flows:
 1. **Visualization Flow**: *"What are our top 3 customer deals? Chart the deal value for each."*
    - Plan: `planner` $\rightarrow$ `executor` $\rightarrow$ `cortex_researcher` $\rightarrow$ `executor` $\rightarrow$ `chart_generator` $\rightarrow$ `chart_summarizer` $\rightarrow$ `END`.
-   - Generates and saves [`top_deals_chart.png`](top_deals_chart.png) in the current directory.
+   - Generates and saves `top_deals_chart.png` in the current directory; the final answer combines the deal synthesis with the chart summary.
 2. **Synthesis Flow**: *"What are our top 3 customer deals and what are the main themes in meeting notes?"*
    - Plan: `planner` $\rightarrow$ `executor` $\rightarrow$ `cortex_researcher` $\rightarrow$ `executor` $\rightarrow$ `web_researcher` $\rightarrow$ `executor` $\rightarrow$ `synthesizer` $\rightarrow$ `END`.
    - Generates an executive summary with figures and citations.
@@ -206,9 +212,10 @@ python evals.py
 ---------------------------------------------------------------------------
 FINAL SYNTHESIZED RESPONSE:
 ---------------------------------------------------------------------------
-HealthTech Corp leads the customer pipeline with a deal valuation of $1.25M, 
-followed by FinTech Global at $890k and OmniRetail Systems at $640k. 
-The top three accounts collectively represent significant near-term enterprise value.
+Top 3 Customer Deals Summary:
+1. HealthTech Corp: $1,250,000 (Stage: Negotiation, Product: Enterprise Compliance)
+...
+**Chart summary:** HealthTech Corp leads the customer pipeline with a deal valuation of $1.25M, ...
 
 ===========================================================================
 TRULENS EVALUATION REPORT (RAG Triad + GPA Alignment)
@@ -234,8 +241,10 @@ streamlit run app.py
 
 Features included in the web interface:
 - **Conversational Chat**: Preserves multi-turn conversation history using `st.session_state` and `st.chat_message`.
-- **Live Status & Feedback**: Displays `st.spinner("Agentes investigando y analizando...")` while orchestrating nodes.
-- **Dynamic Chart Rendering**: Automatically displays `top_deals_chart.png` inline using `st.image` when visualization queries are executed.
+- **Live Status & Feedback**: Displays `st.spinner("Agents researching and analyzing...")` while orchestrating nodes.
+- **Agent Selection**: Sidebar `Enabled agents` multiselect passed to `run_agent(enabled_agents=...)`.
+- **TruLens Scorecard**: `Run TruLens Evaluation Scorecard` checkbox shows the 7 metrics (RAG Triad + GPA) per answer.
+- **Dynamic Chart Rendering**: Displays the chart reported in the graph state (`chart_path`) and stores its bytes in the chat history, so earlier charts are never overwritten.
 - **Plan Inspection**: Collapsible JSON tree viewer for inspecting the generated multi-agent execution plan.
 - **Sidebar Diagnostics**: Real-time connection indicators for OpenAI, Tavily, and Snowflake Cortex.
 
@@ -246,6 +255,12 @@ Once traces and evaluation records have been logged to the SQLite database, laun
 python -c "from trulens.dashboard import run_dashboard; run_dashboard(port=8001)"
 ```
 Navigate to `http://localhost:8001` in your browser to explore execution traces, latency, token consumption, and feedback distributions.
+
+### 5. Run the Test Suite
+```bash
+python -m pytest -v
+```
+The suite forces Mock Fallback mode (no network, no `.env`) and covers schemas, prompts, the SQL guardrail, the Python sandbox, planner/executor routing, chart flows, and evaluations.
 
 ---
 
