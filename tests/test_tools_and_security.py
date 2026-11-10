@@ -368,7 +368,7 @@ def test_sandbox_falls_back_in_process_when_subprocess_unavailable(monkeypatch):
         "import pandas as pd\npd.DataFrame().to_pickle('payload.pkl')",
     ],
 )
-def test_sandbox_blocks_library_file_readers(code):
+def test_sandbox_blocks_library_file_readers(code, isolated_cwd):
     assert sandbox.execute_sandboxed(code).startswith("Python execution blocked by security policy")
 
 
