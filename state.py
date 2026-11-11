@@ -205,6 +205,8 @@ class State(MessagesState):
         Validated relative path of the chart image produced by 'chart_generator' (or None).
     chart_notes:
         One-sentence insight emitted by 'chart_generator' alongside CHART_PATH (or None).
+    language:
+        Language code for user-facing text ('en' or 'es' for Latin American Spanish).
     """
     user_query: Optional[str]
     enabled_agents: Optional[List[str]]
@@ -217,3 +219,4 @@ class State(MessagesState):
     final_answer: Optional[str]
     chart_path: Optional[str]
     chart_notes: Optional[str]
+    language: Optional[str]

@@ -41,6 +41,7 @@ from prompts import (
 
 # Integrated tools import (clean `(str) -> str` wrappers for ReAct agents)
 from tools import query_cortex_agent, run_python_code, search_web
+from i18n import LANGUAGE_INSTRUCTIONS, language_instruction, t
 
 logger = logging.getLogger("sales_data_agent.nodes")
 
@@ -204,6 +205,19 @@ class MockChatModel:
             return MockLLMResponse(content=json.dumps(decision))
 
         # 3. Synthesizer Response
+        elif "You are the Synthesizer" in content and _wants_spanish(content):
+            return MockLLMResponse(
+                content=(
+                    "Resumen de los 3 principales negocios con clientes:\n\n"
+                    "1. HealthTech Corp: USD 1.250.000 (Etapa: Negociación, Producto: Enterprise Compliance)\n"
+                    "2. FinTech Global: USD 890.000 (Etapa: Propuesta, Producto: Risk Analytics API)\n"
+                    "3. OmniRetail Systems: USD 640.000 (Etapa: Decisión, Producto: Inventory Forecasting)\n\n"
+                    "Conclusiones clave de las notas de reunión:\n"
+                    "- Urgencia por la próxima regulación estatal de IA y la supervisión de la FDA (HealthTech Corp).\n"
+                    "- Plazos cercanos de cumplimiento de Open Banking en el primer trimestre (FinTech Global).\n\n"
+                    "Citas: [sales_intelligence.data.sales_metrics, meeting_transcript_healthtech]"
+                )
+            )
         elif "You are the Synthesizer" in content:
             return MockLLMResponse(
                 content=(
@@ -252,6 +266,18 @@ llm = initialize_chat_model(model_name=BASE_LLM_MODEL_NAME, json_mode=False)
 # Factory for ReAct Sub-Agents
 # =====================================================================
 
+def _wants_spanish(text: str) -> bool:
+    """Mock Fallback: detects the Spanish answer instruction in a prompt."""
+    return LANGUAGE_INSTRUCTIONS["es"] in text
+
+
+def _request_text(state_or_dict: Any) -> str:
+    messages = state_or_dict.get("messages", []) if isinstance(state_or_dict, dict) else []
+    if not isinstance(messages, list):
+        return str(messages)
+    return " ".join(str(getattr(m, "content", m)) for m in messages)
+
+
 def build_react_agent(model: Any, tools: List[Any], prompt: SystemMessage) -> Any:
     """
     Constructs a standard ReAct agent using LangGraph prebuilt or internal fallback runner.
@@ -274,14 +300,15 @@ def build_react_agent(model: Any, tools: List[Any], prompt: SystemMessage) -> An
                 # Special Case: Chart Generator Agent
                 if "generate charts" in prompt_content:
                     chart_path = "top_deals_chart.png"
+                    spanish = _wants_spanish(_request_text(state_or_dict))
                     try:
                         import matplotlib.pyplot as plt
                         companies = ['HealthTech Corp', 'FinTech Global', 'OmniRetail Systems']
                         values = [1.25, 0.89, 0.64]
                         plt.figure(figsize=(7, 4))
                         plt.bar(companies, values, color=['#2b5c8f', '#4682b4', '#6baed6'])
-                        plt.title('Top 3 Customer Deals ($M)')
-                        plt.ylabel('Deal Value ($ Millions)')
+                        plt.title('Top 3 negocios con clientes (USD M)' if spanish else 'Top 3 Customer Deals ($M)')
+                        plt.ylabel('Valor del negocio (USD millones)' if spanish else 'Deal Value ($ Millions)')
                         plt.tight_layout()
                         plt.savefig(chart_path)
                         plt.close()
@@ -298,6 +325,13 @@ def build_react_agent(model: Any, tools: List[Any], prompt: SystemMessage) -> An
                     return {"messages": [AIMessage(content=tool_result_str, name="chart_generator")]}
 
                 # Special Case: Chart Summarizer Agent
+                if "generate image captions" in prompt_content and _wants_spanish(_request_text(state_or_dict)):
+                    tool_result_str = (
+                        "HealthTech Corp lidera el pipeline de clientes con un negocio valuado en USD 1,25 M, "
+                        "seguido por FinTech Global con USD 890 mil y OmniRetail Systems con USD 640 mil. "
+                        "Las tres cuentas principales concentran un valor empresarial significativo en el corto plazo."
+                    )
+                    return {"messages": [AIMessage(content=tool_result_str, name="chart_summarizer")]}
                 if "generate image captions" in prompt_content:
                     tool_result_str = (
                         "HealthTech Corp leads the customer pipeline with a deal valuation of $1.25M, "
@@ -507,6 +541,7 @@ def _synthesize_answer(state: State, context_messages: List[str]) -> str:
             content=(
                 f"User question: {_user_question(state)}\n\n"
                 f"{SYNTHESIZER_INSTRUCTIONS}\n\n"
+                f"{language_instruction(state.get('language'))}\n\n"
                 f"Context:\n\n{context_str}"
             )
         )
@@ -694,7 +729,10 @@ def chart_node(state: State) -> Command[Literal["chart_summarizer", "synthesizer
     instruction = state.get("agent_query") or state.get("user_query", "")
     findings = "\n\n---\n\n".join(_research_findings(state)) or "No research data collected."
     chart_request = HumanMessage(
-        content=f"Chart task: {instruction}\n\nData collected by the researchers:\n{findings}"
+        content=(
+            f"Chart task: {instruction}\n\nData collected by the researchers:\n{findings}\n\n"
+            f"Chart titles and labels: {language_instruction(state.get('language'))}"
+        )
     )
     result = chart_agent.invoke({"messages": [chart_request]})
     output = _message_text(result["messages"][-1])
@@ -726,7 +764,8 @@ def chart_summary_node(
     caption_request = HumanMessage(
         content=(
             f"PATH: {state.get('chart_path') or 'unknown'}\n"
-            f"CHART_NOTES: {state.get('chart_notes') or 'none'}"
+            f"CHART_NOTES: {state.get('chart_notes') or 'none'}\n"
+            f"{language_instruction(state.get('language'))}"
         )
     )
     result = chart_summary_agent.invoke({"messages": [caption_request]})
@@ -735,7 +774,7 @@ def chart_summary_node(
     findings = _research_findings(state)
     if findings:
         synthesis = _synthesize_answer(state, findings + [f"Chart summary: {caption}"])
-        final_answer = f"{synthesis}\n\n**Chart summary:** {caption}"
+        final_answer = f"{synthesis}\n\n**{t('chart_summary_label', state.get('language'))}:** {caption}"
     else:
         final_answer = caption
 

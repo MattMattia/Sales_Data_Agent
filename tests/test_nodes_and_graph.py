@@ -450,3 +450,37 @@ def test_run_agent_never_runs_disabled_chart_summarizer(isolated_cwd):
     names = [getattr(m, "name", None) for m in final_state["messages"]]
     assert "chart_summarizer" not in names
     assert final_state["final_answer"]
+
+
+# ---------------------------------------------------------------------
+# Answer language (English / Latin American Spanish)
+# ---------------------------------------------------------------------
+
+SPANISH_CHART_QUERY = "¿Cuáles son nuestros 3 principales negocios con clientes? Haz un gráfico del valor de cada uno."
+
+
+def test_run_agent_answers_in_spanish_when_requested(isolated_cwd):
+    final_state = run_agent(SPANISH_CHART_QUERY, language="es", verbose=False)
+
+    answer = final_state["final_answer"]
+    assert "**Resumen del gráfico:**" in answer
+    assert "Resumen de los 3 principales negocios" in answer
+    assert "Chart summary" not in answer
+    assert final_state["chart_path"]
+
+
+def test_run_agent_defaults_to_english(isolated_cwd):
+    final_state = run_agent("What are our top 3 customer deals? Chart the deal value for each.", verbose=False)
+
+    assert "**Chart summary:**" in final_state["final_answer"]
+    assert final_state["language"] == "en"
+
+
+def test_synthesizer_prompt_carries_the_language_instruction(monkeypatch):
+    fake = FakeLLM("respuesta")
+    monkeypatch.setattr(nodes, "llm", fake)
+
+    synthesizer_node({"user_query": "q", "language": "es", "messages": [HumanMessage(content="q")]})
+
+    prompt_text = fake.prompts[0][0].content
+    assert "español latinoamericano (es-419)" in prompt_text

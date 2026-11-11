@@ -11,6 +11,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 # Shared State and Message Schemas
+from i18n import normalize_language
 from state import DEFAULT_ENABLED_AGENTS, HumanMessage, State
 
 # Orchestrator and Worker Nodes
@@ -175,6 +176,7 @@ def run_agent(
     enabled_agents: Optional[List[str]] = None,
     compiled_graph: Optional[Any] = None,
     verbose: bool = True,
+    language: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Executes the multi-agent graph to answer the user query.
@@ -189,6 +191,9 @@ def run_agent(
         Compiled graph instance (defaults to global compiled graph).
     verbose: bool
         If True, prints execution banners and final response to console.
+    language: str, optional
+        Language of the final answer: 'en' (default) or 'es' (Latin American
+        Spanish). Locale tags such as 'es-AR' are accepted.
 
     Returns:
     --------
@@ -214,6 +219,7 @@ def run_agent(
         "replan_attempts": {},
         "chart_path": None,
         "chart_notes": None,
+        "language": normalize_language(language),
     }
 
     final_state = active_graph.invoke(initial_state)

@@ -123,3 +123,25 @@ def test_each_browser_session_gets_its_own_trulens_recorder(isolated_cwd):
 
     assert "trulens_recorder" in first.session_state
     assert first.session_state["trulens_recorder"] is not second.session_state["trulens_recorder"]
+
+
+def test_switching_to_spanish_translates_the_interface(app):
+    at = app.run()
+    at.selectbox(key="language").select("es").run()
+
+    assert not at.exception
+    assert "¡Hola! Soy **Sales Data Agent**" in at.chat_message[0].markdown[0].value
+    assert at.checkbox[0].label == "Ejecutar scorecard de evaluación de TruLens"
+    assert any(button.label == "🗑️ Borrar conversación" for button in at.button)
+    assert at.multiselect[0].label == "Agentes habilitados"
+
+
+def test_spanish_question_gets_a_spanish_answer(app):
+    at = app.run()
+    at.selectbox(key="language").select("es").run()
+    at.button(key="sample_0").click().run()
+
+    assert not at.exception
+    reply = _assistant_messages(at)[-1]
+    assert "**Resumen del gráfico:**" in reply["content"]
+    assert isinstance(reply["chart_bytes"], bytes)
