@@ -1,5 +1,7 @@
 # Sales Data Agent: Streamlit app (8501) + TruLens dashboard (8001) sharing one
 # persistent TruLens database volume. Secrets come from an optional local .env.
+# Host ports are configurable to avoid conflicts: APP_PORT (default 8501) and
+# DASHBOARD_PORT (default 8001, loopback only), e.g. `APP_PORT=8502 docker compose up`.
 
 x-hardening: &hardening
   security_opt:
@@ -13,7 +15,7 @@ services:
     build: .
     image: sales-data-agent:latest
     ports:
-      - "8501:8501"
+      - "${APP_PORT:-8501}:8501"
     env_file:
       - path: .env
         required: false
@@ -28,7 +30,7 @@ services:
     image: sales-data-agent:latest
     # Unauthenticated UI that exposes every recorded trace: loopback only, no secrets.
     ports:
-      - "127.0.0.1:8001:8001"
+      - "127.0.0.1:${DASHBOARD_PORT:-8001}:8001"
     environment:
       - TRULENS_DATABASE_URL=sqlite:////app/data/default.sqlite
     volumes:

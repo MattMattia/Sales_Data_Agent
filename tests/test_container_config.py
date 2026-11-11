@@ -64,7 +64,7 @@ def test_trulens_dashboard_is_loopback_only_and_gets_no_secrets():
     services = yaml.safe_load(_read("docker-compose.yml"))["services"]
     dashboard = services["trulens-dashboard"]
 
-    assert dashboard["ports"] == ["127.0.0.1:8001:8001"]
+    assert dashboard["ports"] == ["127.0.0.1:${DASHBOARD_PORT:-8001}:8001"]
     assert "env_file" not in dashboard
     assert "env_file" in services["sales-data-agent"]
 
@@ -77,3 +77,43 @@ def test_ci_builds_the_image_and_waits_for_a_healthy_container():
     assert "docker build" in script
     assert "{{.State.Health.Status}}" in script and "healthy" in script
     assert "id -u" in script and "10001" in script
+
+
+def _published_ports(env_overrides):
+    """Host ports Docker Compose would publish, resolved by the real compose CLI."""
+    import json
+    import os
+    import shutil
+    import subprocess
+
+    if shutil.which("docker") is None:
+        pytest.skip("docker CLI not available")
+    env = {**os.environ, **env_overrides}
+    for name in ("APP_PORT", "DASHBOARD_PORT"):
+        if name not in env_overrides:
+            env.pop(name, None)
+    result = subprocess.run(
+        ["docker", "compose", "config", "--format", "json"],
+        cwd=ROOT, env=env, capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"docker compose config unavailable: {result.stderr.strip()[:200]}")
+    services = json.loads(result.stdout)["services"]
+    return {
+        name: [(port.get("host_ip", ""), str(port["published"])) for port in service.get("ports", [])]
+        for name, service in services.items()
+    }
+
+
+def test_compose_ports_default_to_8501_and_loopback_8001():
+    ports = _published_ports({})
+
+    assert ports["sales-data-agent"] == [("", "8501")]
+    assert ports["trulens-dashboard"] == [("127.0.0.1", "8001")]
+
+
+def test_compose_ports_can_be_overridden_to_avoid_conflicts():
+    ports = _published_ports({"APP_PORT": "8502", "DASHBOARD_PORT": "8002"})
+
+    assert ports["sales-data-agent"] == [("", "8502")]
+    assert ports["trulens-dashboard"] == [("127.0.0.1", "8002")]

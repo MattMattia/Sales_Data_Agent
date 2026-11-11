@@ -306,6 +306,20 @@ docker compose up --build
 | `sales-data-agent` | http://localhost:8501 | Streamlit chat interface |
 | `trulens-dashboard` | http://localhost:8001 | TruLens traces and feedback (starts once the app is healthy; bound to `127.0.0.1` only) |
 
+If port 8501 or 8001 is already taken by another app, choose different host ports with `APP_PORT` and `DASHBOARD_PORT` (you can also put them in `.env`):
+
+```bash
+# macOS / Linux
+APP_PORT=8502 DASHBOARD_PORT=8002 docker compose up --build
+```
+
+```powershell
+# Windows (PowerShell)
+$env:APP_PORT=8502; $env:DASHBOARD_PORT=8002; docker compose up --build
+```
+
+The app is then served at http://localhost:8502 and the dashboard at http://localhost:8002.
+
 How it is wired:
 
 - **Credentials**: an optional `.env` in the project root is injected at runtime (`env_file`, `required: false`). Without it, everything runs in Mock Fallback mode. Secrets are never copied into the image.
