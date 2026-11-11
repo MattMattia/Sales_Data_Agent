@@ -13,11 +13,12 @@ Branch: fix/audit-remediation · Delivery: work-unit commits, fast-forward main,
 ## Tasks
 
 - T1 S1 inline — done f388ec2 (local: image built, container healthy in ~9 s, UID 10001, no .env)
-- T2 S3 inline — done e5375a5 (RED: 5 failed; GREEN: 222 passed)
+- T2 S3 inline — done e5375a5 (RED: 5 failed; GREEN at that commit: 222 passed)
 - T3 S2 inline — done 9c1761e (README.es.md + cross-link test)
-- T4 S4 inline — pending
+- T4 S4 inline — merged to main and pushed; app run for the user
 
 ## Log
 
 - L1 (2026-11-10) User: "yo ya activé ahora el docker desktop pero si alguien replica el repositorio y lo usa entonce es mejor la segunda opcion, y hay que actualizar el read me y poder leerlo en español o ingles y que se pueda usar el software tanto en español como en ingles, español latinoamerica, haz esto y al ultimo vamos a guardar y mergear todo y vamoa a hacer correr el software para que yo vea que logramos"
 - L2 224 passed; graph.py/evals.py run in English by default; Spanish verified through run_agent(language='es') and AppTest.
+- L3 Reviews approved and acknowledged for 0eb8a61..9c1761e and the follow-up suggestions commit; 225 passed.
