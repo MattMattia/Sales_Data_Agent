@@ -1,5 +1,7 @@
 # Sales Data Agent: Autonomous Multi-Agent System with LangGraph & TruLens
 
+**English** | [Español (Latinoamérica)](README.es.md)
+
 An enterprise-grade, autonomous Multi-Agent Sales Intelligence system built with **LangGraph**, integrating **Snowflake Cortex** (Analyst Text-to-SQL & Cortex Search), **Tavily Web Search**, dynamic Python REPL visualization, and full-stack observability with **TruLens** (RAG Triad + GPA Alignment).
 
 ---
@@ -64,15 +66,17 @@ flowchart TD
 Sales_Data_Agent/
 ├── .env.template          # Environment variables template with configuration guidance
 ├── requirements.txt       # Production dependencies with minimum versions
-├── README.md              # Project documentation, architecture, and setup instructions
+├── README.md              # Project documentation (English)
+├── README.es.md           # Project documentation (Latin American Spanish)
 ├── pytest.ini             # Test runner configuration
 ├── Dockerfile             # Hardened multi-stage image (non-root, health check, no secrets)
 ├── docker-compose.yml     # Streamlit app + TruLens dashboard on a shared data volume
 ├── .dockerignore          # Keeps secrets, caches and local state out of the build context
 ├── .github/workflows/
-│   └── ci.yml             # CI: quality & secret scan, pytest, mock end-to-end smoke test
+│   └── ci.yml             # CI: quality & secret scan, pytest, mock end-to-end smoke test, Docker image check
 ├── app.py                 # Interactive Streamlit web interface with chat and chart rendering
 ├── artifacts.py           # Chart artifacts for the UI (only images written during the current run)
+├── i18n.py                # UI translations and answer language (English / Latin American Spanish)
 ├── state.py               # State schema, Pydantic models, `.env` loading, shared messages & agent registry
 ├── prompts.py             # System prompts, GPA plan prompts, and executor decision prompts
 ├── tools.py               # CortexAgentTool (read-only SQL guardrail), Tavily, sandboxed Python tool
@@ -85,8 +89,8 @@ Sales_Data_Agent/
 
 ### Module Breakdown
 
-- **[`app.py`](app.py)**: Streamlit web application providing a conversational UI (`st.chat_message`, `st.chat_input`), real-time execution status (`st.spinner`), an enabled-agents selector, an optional TruLens scorecard per answer, expandable execution plans, and chart rendering stored as bytes per message.
-- **[`state.py`](state.py)**: Extends LangGraph's `MessagesState` with typed attributes: `user_query`, `enabled_agents`, `plan`, `current_step`, `agent_query`, `last_reason`, `replan_flag`, `replan_attempts`, `final_answer`, `chart_path`, and `chart_notes`. Includes `PlanStep` and `ExecutorDecision` Pydantic models (enforced by the planner and executor), `load_environment()`, the shared message classes, and `DEFAULT_ENABLED_AGENTS`.
+- **[`app.py`](app.py)**: Streamlit web application providing a conversational UI (`st.chat_message`, `st.chat_input`), real-time execution status (`st.spinner`), a language selector (English / Latin American Spanish), an enabled-agents selector, an optional TruLens scorecard per answer, expandable execution plans, and chart rendering stored as bytes per message.
+- **[`state.py`](state.py)**: Extends LangGraph's `MessagesState` with typed attributes: `user_query`, `enabled_agents`, `plan`, `current_step`, `agent_query`, `last_reason`, `replan_flag`, `replan_attempts`, `final_answer`, `chart_path`, `chart_notes`, and `language`. Includes `PlanStep` and `ExecutorDecision` Pydantic models (enforced by the planner and executor), `load_environment()`, the shared message classes, and `DEFAULT_ENABLED_AGENTS`.
 - **[`prompts.py`](prompts.py)**: Centralizes all prompt engineering. Features `plan_prompt` (incorporating L6 GPA sub-goals and replanning notices), `executor_prompt` (JSON router schema), and system prompts for all ReAct agents and the synthesizer.
 - **[`tools.py`](tools.py)**: Encapsulates external integrations:
   - `CortexAgentTool`: Snowflake Snowpark and Cortex Lite Agent Service runner. Creates the Snowpark session from `SNOWFLAKE_*` variables, uses `SNOWFLAKE_WAREHOUSE`, and only executes single read-only `SELECT`/`WITH` statements. Includes an automatic high-fidelity mock fallback when credentials are not configured.
@@ -95,6 +99,7 @@ Sales_Data_Agent/
   - `query_cortex_agent`, `search_web`, `run_python_code`: `(str) -> str` wrappers given to the ReAct agents; retrieval wrappers emit TruLens `RETRIEVAL` spans.
 - **[`nodes.py`](nodes.py)**: Implements all graph nodes. Encapsulates `planner_node`, `executor_node`, `cortex_agents_research_node`, `web_research_node`, `chart_node`, `chart_summary_node`, and `synthesizer_node`.
 - **[`graph.py`](graph.py)**: Assembles and compiles the `StateGraph(State)`. Exposes `build_graph()`, `run_agent()`, and graph topology visualization functions (`get_graph_mermaid()`, `display_ascii_graph()`).
+- **[`i18n.py`](i18n.py)**: All user-facing strings in English and Latin American Spanish, sample questions per language, locale normalization (`es-AR`, `es_419`, ... map to `es`), and the prompt instruction that makes the synthesizer and chart summarizer answer in the selected language.
 - **[`evals.py`](evals.py)**: Configures the 7 evaluation metrics across the RAG Triad and GPA dimensions. Implements `setup_trulens_recorder()` with SQLite persistence (location from `TRULENS_DATABASE_URL`) and the `@inline_evaluation` decorator.
 
 ---
@@ -208,7 +213,7 @@ TRULENS_DASHBOARD_PORT=8001
 ## How to Run
 
 ### 1. Run the Multi-Agent Pipeline End-to-End
-Execute `graph.py` directly from your terminal:
+Execute `graph.py` directly from your terminal (from Python, pass `run_agent(query, language="es")` to get the answer in Latin American Spanish):
 
 ```bash
 python graph.py
@@ -269,6 +274,7 @@ streamlit run app.py
 ```
 
 Features included in the web interface:
+- **Bilingual Interface**: a sidebar `Language / Idioma` selector switches every label, the sample questions, and the language of the final answers between English and Latin American Spanish. It starts in Spanish when the browser locale is Spanish. Internal plans stay in English.
 - **Conversational Chat**: Preserves multi-turn conversation history using `st.session_state` and `st.chat_message`.
 - **Live Status & Feedback**: Displays `st.spinner("Agents researching and analyzing...")` while orchestrating nodes.
 - **Agent Selection**: Sidebar `Enabled agents` multiselect passed to `run_agent(enabled_agents=...)`.
@@ -328,14 +334,16 @@ The suite forces Mock Fallback mode (no network, no `.env`), so it is determinis
 | `test_nodes_and_graph.py` | Planner/executor routing, per-step and per-run replanning limits, chart flows (including a disabled `chart_summarizer`), and end-to-end graph runs. |
 | `test_artifacts.py` | Chart freshness: images left by earlier runs are never attached to a new answer. |
 | `test_production_contracts.py` | Production code paths without network: Cortex SSE parsing and fallback, `ChatOpenAI` construction, TruLens feedback reading, `RETRIEVAL` span attributes, database URL resolution. |
-| `test_streamlit_app.py` | The real UI via Streamlit `AppTest`: initial load, chat answers with plan and 7-metric scorecard, chart persistence, clearing history, no deprecation warnings. |
-| `test_container_config.py` | Docker invariants: non-root user, health check, `Agg` backend, no `.env` in the image, shared TruLens volume. |
+| `test_streamlit_app.py` | The real UI via Streamlit `AppTest`: initial load, chat answers with plan and 7-metric scorecard, chart persistence, clearing history, no deprecation warnings, and the Spanish interface and answers. |
+| `test_i18n.py` | Translation parity between English and Spanish, locale normalization, and the answer-language instruction. |
+| `test_container_config.py` | Docker invariants: non-root user, health check, `Agg` backend, no `.env` in the image, shared TruLens volume, and the CI image job. |
 
 [GitHub Actions](.github/workflows/ci.yml) runs on pushes to `main`, `fix/**`, `feat/**`, and on pull requests to `main`, with read-only permissions and cancellation of superseded runs:
 
 1. **quality-and-security**: installs dependencies on Python 3.12, compiles every module, and scans tracked files for leaked secrets or committed `.env` files.
 2. **test-suite**: `pytest -v --tb=short`.
 3. **e2e-smoke-test**: `python graph.py` and `python evals.py` in Mock Fallback mode.
+4. **docker-image**: validates `docker-compose.yml`, builds the image, waits until the container reports healthy, and checks that it runs as `appuser` (UID 10001) without a baked `.env`. Anyone who clones the repository gets an image verified on every push, without needing Docker locally.
 
 ---
 

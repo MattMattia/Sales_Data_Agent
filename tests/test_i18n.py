@@ -33,3 +33,14 @@ def test_language_instruction_targets_latin_american_spanish():
 
 def test_each_language_offers_three_sample_queries():
     assert len(i18n.sample_queries("en")) == len(i18n.sample_queries("es")) == 3
+
+
+def test_readmes_link_to_each_other():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    english = (root / "README.md").read_text(encoding="utf-8")
+    spanish = (root / "README.es.md").read_text(encoding="utf-8")
+
+    assert "[Español (Latinoamérica)](README.es.md)" in english.splitlines()[2]
+    assert "[English](README.md)" in spanish.splitlines()[2]
