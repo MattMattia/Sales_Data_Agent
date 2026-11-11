@@ -40,7 +40,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Static compilation
-        run: python -m py_compile state.py prompts.py sandbox.py artifacts.py tools.py nodes.py graph.py evals.py app.py
+        run: python -m py_compile state.py prompts.py sandbox.py artifacts.py i18n.py tools.py nodes.py graph.py evals.py app.py
 
       - name: Scan tracked files for leaked secrets
         run: |
@@ -107,3 +107,54 @@ jobs:
 
       - name: Run the TruLens evaluation suite
         run: python evals.py
+
+  docker-image:
+    name: Docker image build & health check
+    needs: quality-and-security
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate the compose file
+        run: docker compose config --quiet
+
+      - name: Build the image
+        run: docker build --tag sales-data-agent:ci .
+
+      - name: Start the container and wait until it is healthy
+        run: |
+          docker run --detach --name sales-data-agent-ci --publish 8501:8501 sales-data-agent:ci
+          for attempt in $(seq 1 40); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' sales-data-agent-ci)
+            echo "attempt ${attempt}: ${status}"
+            if [ "$status" = "healthy" ]; then
+              break
+            fi
+            sleep 3
+          done
+          if [ "$status" != "healthy" ]; then
+            docker logs sales-data-agent-ci
+            echo "::error::Container did not become healthy."
+            exit 1
+          fi
+          curl --fail --silent --show-error http://localhost:8501/_stcore/health
+
+      - name: Check runtime hardening
+        run: |
+          uid=$(docker exec sales-data-agent-ci id -u)
+          if [ "$uid" != "10001" ]; then
+            echo "::error::Container runs as UID ${uid}, expected 10001 (appuser)."
+            exit 1
+          fi
+          if docker exec sales-data-agent-ci sh -c 'ls -a /app | grep -E "^\.env$"'; then
+            echo "::error::A .env file was baked into the image."
+            exit 1
+          fi
+          echo "Runs as appuser (10001) and ships no .env."
+
+      - name: Stop the container
+        if: always()
+        run: docker rm --force sales-data-agent-ci || true

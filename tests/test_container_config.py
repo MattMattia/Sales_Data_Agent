@@ -67,3 +67,13 @@ def test_trulens_dashboard_is_loopback_only_and_gets_no_secrets():
     assert dashboard["ports"] == ["127.0.0.1:8001:8001"]
     assert "env_file" not in dashboard
     assert "env_file" in services["sales-data-agent"]
+
+
+def test_ci_builds_the_image_and_waits_for_a_healthy_container():
+    yaml = pytest.importorskip("yaml")
+    job = yaml.safe_load(_read(".github/workflows/ci.yml"))["jobs"]["docker-image"]
+    script = "\n".join(step.get("run", "") for step in job["steps"])
+
+    assert "docker build" in script
+    assert "{{.State.Health.Status}}" in script and "healthy" in script
+    assert "id -u" in script and "10001" in script
