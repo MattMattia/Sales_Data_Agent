@@ -145,3 +145,11 @@ def test_spanish_question_gets_a_spanish_answer(app):
     reply = _assistant_messages(at)[-1]
     assert "**Resumen del gráfico:**" in reply["content"]
     assert isinstance(reply["chart_bytes"], bytes)
+
+
+def test_welcome_entry_keeps_readable_text_in_history(app):
+    at = app.run()
+
+    first = at.session_state["messages"][0]
+    assert first["welcome"] is True
+    assert isinstance(first["content"], str) and "Sales Data Agent" in first["content"]

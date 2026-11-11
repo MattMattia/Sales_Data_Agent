@@ -125,6 +125,7 @@ jobs:
         run: docker build --tag sales-data-agent:ci .
 
       - name: Start the container and wait until it is healthy
+        # 40 attempts x 3 s = 120 s budget, well above the image's 40 s HEALTHCHECK start period.
         run: |
           docker run --detach --name sales-data-agent-ci --publish 8501:8501 sales-data-agent:ci
           for attempt in $(seq 1 40); do
@@ -143,6 +144,7 @@ jobs:
           curl --fail --silent --show-error http://localhost:8501/_stcore/health
 
       - name: Check runtime hardening
+        # 10001 is the appuser UID created in the Dockerfile runtime stage.
         run: |
           uid=$(docker exec sales-data-agent-ci id -u)
           if [ "$uid" != "10001" ]; then

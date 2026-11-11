@@ -267,7 +267,11 @@ llm = initialize_chat_model(model_name=BASE_LLM_MODEL_NAME, json_mode=False)
 # =====================================================================
 
 def _wants_spanish(text: str) -> bool:
-    """Mock Fallback: detects the Spanish answer instruction in a prompt."""
+    """
+    Mock Fallback: detects the Spanish answer instruction in a prompt. It
+    matches i18n.LANGUAGE_INSTRUCTIONS['es'] verbatim, so the mock answers
+    follow that sentence automatically if it is reworded.
+    """
     return LANGUAGE_INSTRUCTIONS["es"] in text
 
 

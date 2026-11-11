@@ -331,7 +331,7 @@ The suite forces Mock Fallback mode (no network, no `.env`), so it is determinis
 |-------------|-------------------|
 | `test_state_and_prompts.py` | Pydantic schemas, `.env` loading, prompts, and the `.env.template` least-privilege contract. |
 | `test_tools_and_security.py` | Mock integrations, the read-only SQL guardrail, and all three sandbox layers (policy, timeout, secret-free child). |
-| `test_nodes_and_graph.py` | Planner/executor routing, per-step and per-run replanning limits, chart flows (including a disabled `chart_summarizer`), and end-to-end graph runs. |
+| `test_nodes_and_graph.py` | Planner/executor routing, per-step and per-run replanning limits, chart flows (including a disabled `chart_summarizer`), end-to-end graph runs, and the answer language. |
 | `test_artifacts.py` | Chart freshness: images left by earlier runs are never attached to a new answer. |
 | `test_production_contracts.py` | Production code paths without network: Cortex SSE parsing and fallback, `ChatOpenAI` construction, TruLens feedback reading, `RETRIEVAL` span attributes, database URL resolution. |
 | `test_streamlit_app.py` | The real UI via Streamlit `AppTest`: initial load, chat answers with plan and 7-metric scorecard, chart persistence, clearing history, no deprecation warnings, and the Spanish interface and answers. |

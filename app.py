@@ -213,13 +213,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Initialize chat history in session_state. The welcome message is rendered in
-# the current language on every rerun, so switching languages translates it.
+# Initialize chat history in session_state. The welcome entry stores readable
+# text, and its `welcome` flag makes the render loop show it in the current
+# language, so switching languages translates it.
 if "messages" not in st.session_state:
     st.session_state.messages = [
         {
             "role": "assistant",
-            "content": None,
+            "content": t("welcome", lang),
             "welcome": True,
             "chart_bytes": None,
             "plan": None,
